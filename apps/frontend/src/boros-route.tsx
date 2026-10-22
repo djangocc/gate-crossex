@@ -198,7 +198,7 @@ function leverageLabel(strategy: BorosStrategy, leverages: StrategyLeverages): s
 }
 
 function borosMarketUrl(marketId: number, direction: 'long' | 'short'): string {
-  return `https://boros.pendle.finance/markets/${marketId}?direction=${direction}&utm_source=YQG01`;
+  return `https://boros.pendle.finance/markets/${marketId}?direction=${direction}`;
 }
 
 export function BorosStrategyView({

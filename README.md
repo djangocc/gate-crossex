@@ -1,5 +1,8 @@
 # Gate CrossEx 本地交易终端 | Gate CrossEx Local Trading Terminal
 
+> 本项目是 [your-quantguy/gate-crossex](https://github.com/your-quantguy/gate-crossex) 的个人 fork，已移除渠道返佣、邀请和来源归因参数。默认安装与更新来源为本仓库。原作者版权与 AGPL-3.0-only 许可证保留。
+> This is a personal fork with broker, referral, and source attribution removed. Installation and updates default to this repository; upstream copyright and the AGPL-3.0-only license are retained.
+
 一个本地运行的开源 Gate CrossEx 行情与实盘交易桌面界面。
 
 A local, open-source desktop interface for Gate CrossEx market data and live trading.
@@ -10,9 +13,9 @@ A local, open-source desktop interface for Gate CrossEx market data and live tra
 
 ## 什么是 CrossEx？ | What is CrossEx?
 
-CrossEx 将 Gate.io、Binance、OKX、Bybit、Kraken、Hyperliquid、Deribit 和 Lighter 接入同一个跨所账户，在这些交易所之间共享保证金和可用资金，减少在每个平台分别预留资金的需要，从而提高资金效率。[注册 CrossEx](https://www.gate.com/zh/crossex?ref=QUANTGUY)。
+CrossEx 将 Gate.io、Binance、OKX、Bybit、Kraken、Hyperliquid、Deribit 和 Lighter 接入同一个跨所账户，在这些交易所之间共享保证金和可用资金，减少在每个平台分别预留资金的需要，从而提高资金效率。[注册 CrossEx](https://www.gate.com/zh/crossex)。
 
-CrossEx connects Gate.io, Binance, OKX, Bybit, Kraken, Hyperliquid, Deribit, and Lighter through one cross-exchange account, sharing margin and available capital across these venues. This reduces the need to reserve funds separately on each exchange and improves capital efficiency. [Sign up for CrossEx](https://www.gate.com/crossex?ref=QUANTGUY).
+CrossEx connects Gate.io, Binance, OKX, Bybit, Kraken, Hyperliquid, Deribit, and Lighter through one cross-exchange account, sharing margin and available capital across these venues. This reduces the need to reserve funds separately on each exchange and improves capital efficiency. [Sign up for CrossEx](https://www.gate.com/crossex).
 
 ## 主要功能 | What it does
 
@@ -46,7 +49,7 @@ The first time you use Gate CrossEx, run the **install command** once. After tha
    Paste the install command below, press Return, and wait for it to finish:
 
    ```bash
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/your-quantguy/gate-crossex/main/bootstrap.sh)"
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/djangocc/gate-crossex/main/bootstrap.sh)"
    ```
 
 3. 看到 `Gate CrossEx is ready to start` 后，运行下面的启动命令：<br>
@@ -72,7 +75,7 @@ The first time you use Gate CrossEx, run the **install command** once. After tha
    Paste the install command below, press Enter, and wait for it to finish:
 
    ```powershell
-   & ([scriptblock]::Create((Invoke-RestMethod https://raw.githubusercontent.com/your-quantguy/gate-crossex/main/bootstrap.ps1)))
+   & ([scriptblock]::Create((Invoke-RestMethod https://raw.githubusercontent.com/djangocc/gate-crossex/main/bootstrap.ps1)))
    ```
 
 3. 看到 `Gate CrossEx is ready to start` 后，在同一个 PowerShell 窗口运行下面的启动命令：<br>
@@ -145,8 +148,8 @@ A bootstrap installation has no system service to uninstall. Stop it, back up an
   The backend is local-only; application JavaScript never receives stored API secrets.
 - 发布包会校验哈希，但目前尚未经过 Apple 公证或 Windows Authenticode 签名。<br>
   Release archives are checksum-verified but are not yet Apple-notarized or Windows Authenticode-signed.
-- Gate 可能向维护者支付 API Broker 返佣；这不会改变你的手续费，也不会授予维护者账户访问权限。<br>
-  Gate may pay the maintainer an API Broker rebate; this does not change your fees or grant account access.
+- 本分支不发送 API Broker 渠道标记；注册链接和 Boros 跳转链接均不附带邀请或来源归因参数。<br>
+  This fork sends no API Broker channel attribution. Registration and Boros links contain no referral or source-attribution parameters.
 
 请通过 [GitHub 私密漏洞报告](SECURITY.md)提交安全问题。请勿公开发布 API 密钥、账户标识、数据库或未脱敏日志。
 

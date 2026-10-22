@@ -90,7 +90,7 @@ describe('Gate APIv4 signing', () => {
       .rejects.toEqual(new GateApiError(401, 'INVALID_SIGNATURE'));
   });
 
-  it('signs and sends only the documented CrossEx order create and cancel routes', async () => {
+  it('signs CrossEx order create and cancel requests without broker attribution', async () => {
     const calls: Array<{ url: string; method: string; body: string | null; sign: string | null; channel: string | null }> = [];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
@@ -104,7 +104,7 @@ describe('Gate APIv4 signing', () => {
     await client.cancelOrder(credentials, '123456');
 
     expect(calls).toEqual([
-      expect.objectContaining({ url: 'https://api.gateio.ws/api/v4/crossex/orders', method: 'POST', body: expect.stringContaining('OKX_FUTURE_BTC_USDT'), sign: expect.stringMatching(/^[a-f0-9]{128}$/), channel: 'yourquantguy' }),
+      expect.objectContaining({ url: 'https://api.gateio.ws/api/v4/crossex/orders', method: 'POST', body: expect.stringContaining('OKX_FUTURE_BTC_USDT'), sign: expect.stringMatching(/^[a-f0-9]{128}$/), channel: null }),
       expect.objectContaining({ url: 'https://api.gateio.ws/api/v4/crossex/orders/123456', method: 'DELETE', body: null, sign: expect.stringMatching(/^[a-f0-9]{128}$/), channel: null }),
     ]);
   });

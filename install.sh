@@ -8,7 +8,7 @@
 set -euo pipefail
 umask 077
 
-REPO_SLUG="${GCT_REPO_SLUG:-your-quantguy/gate-crossex}"
+REPO_SLUG="${GCT_REPO_SLUG:-djangocc/gate-crossex}"
 RELEASE_TAG="${GCT_RELEASE_TAG:-latest}"
 PORT="${GCT_PORT:-17840}"
 ROOT="${GCT_INSTALL_ROOT:-$HOME/Library/Application Support/Gate CrossEx}"

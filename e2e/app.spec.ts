@@ -232,8 +232,8 @@ test.describe.serial('local trading terminal', () => {
     await exchangeFilter.getByRole('checkbox', { name: 'Hyperliquid' }).uncheck();
     await expect(opportunities.getByRole('radio')).toHaveCount(1);
     await expect(exchangeFilter.getByRole('button', { name: 'Select all' })).toBeEnabled();
-    await expect(page.getByRole('link', { name: /Open long market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/185?direction=long&utm_source=YQG01');
-    await expect(page.getByRole('link', { name: /Open short market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/187?direction=short&utm_source=YQG01');
+    await expect(page.getByRole('link', { name: /Open long market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/185?direction=long');
+    await expect(page.getByRole('link', { name: /Open short market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/187?direction=short');
     await exchangeFilter.getByRole('checkbox', { name: 'Hyperliquid' }).check();
     await expect(opportunities.getByRole('radio')).toHaveCount(2);
     await expect(opportunities.getByRole('radio', { name: /days to maturity.*Matures on/ })).toHaveCount(2);
@@ -248,8 +248,8 @@ test.describe.serial('local trading terminal', () => {
     expect(initialReturn).toMatch(/%$/);
     expect(initialOpportunityApr).toMatch(/%$/);
     await expect(opportunities.getByRole('radio', { name: /OKX ↔ Hyperliquid/ })).toContainText('OKX 50× · Hyperliquid 40×');
-    await expect(page.getByRole('link', { name: /Open long market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/185?direction=long&utm_source=YQG01');
-    await expect(page.getByRole('link', { name: /Open short market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/102?direction=short&utm_source=YQG01');
+    await expect(page.getByRole('link', { name: /Open long market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/185?direction=long');
+    await expect(page.getByRole('link', { name: /Open short market on Boros/ })).toHaveAttribute('href', 'https://boros.pendle.finance/markets/102?direction=short');
 
     const quantity = page.getByRole('textbox', { name: 'Position size' });
     const quantitySection = page.locator('.boros-size-setup');
