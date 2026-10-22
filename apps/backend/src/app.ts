@@ -1442,6 +1442,23 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   app.get('/api/trading/snapshot', async () => tradingRuntime.snapshot());
 
+  app.get('/api/trading/position-mode/:symbol', {
+    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+    preHandler: async (request, reply) => {
+      if (request.headers['x-gct-read-intent'] !== 'position-mode') return reply.code(403).send({ error: 'missing_read_intent' });
+    },
+  }, async (request, reply) => {
+    const parsed = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_position_mode_symbol' });
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    try {
+      return await tradingRuntime.queryPositionMode(parsed.data.symbol);
+    } catch (error) {
+      if (error instanceof TradingRuntimeError) return reply.code(error.statusCode).send({ error: error.code });
+      return reply.code(503).send({ error: 'order_position_mode_unavailable' });
+    }
+  });
+
   app.get('/api/trading/leverage/:symbol', {
     config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
     preHandler: async (request, reply) => {

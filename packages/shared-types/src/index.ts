@@ -1023,6 +1023,22 @@ export type TerminalStreamMessage = z.infer<typeof TerminalStreamMessageSchema>;
 export const StrategiesResponseSchema = z.object({ strategies: z.array(StrategyRecordSchema) });
 export const StrategyLogsResponseSchema = z.object({ logs: z.array(StrategyLogSchema) });
 export const InstrumentsResponseSchema = z.object({ items: z.array(CrossExInstrumentSchema) });
+export const PositionModeResponseSchema = z.object({
+  symbol: z.string(),
+  positionMode: z.enum(['SINGLE', 'DUAL']),
+  accountMode: z.enum(['CROSS_EXCHANGE', 'ISOLATED_EXCHANGE']),
+  exchangeType: z.string(),
+});
+export type PositionModeResponse = z.infer<typeof PositionModeResponseSchema>;
+
+/** A reduce-only buy closes the short leg; a reduce-only sell closes the long leg. */
+export function manualOrderPositionSide(
+  mode: 'SINGLE' | 'DUAL', side: 'BUY' | 'SELL', reduceOnly: boolean,
+): 'NONE' | 'LONG' | 'SHORT' {
+  if (mode === 'SINGLE') return 'NONE';
+  return (side === 'BUY') !== reduceOnly ? 'LONG' : 'SHORT';
+}
+
 export const LeverageResponseSchema = z.object({ symbol: z.string(), leverage: z.string().nullable() });
 export const LeverageUpdateResponseSchema = z.object({ symbol: z.string(), leverage: z.string() });
 

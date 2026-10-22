@@ -16,6 +16,8 @@ CrossEx REST is served below `https://api.gateio.ws/api/v4/crossex/*`. The adapt
 
 Private requests use Gate APIv4 `KEY`, `Timestamp`, and HMAC-SHA512 `SIGN` authentication. This fork sends no `X-Gate-Channel-Id` broker attribution header on any request, including order placement.
 
+Manual orders read the current account position mode before submission, including the selected venue in isolated-exchange mode. Single-mode orders use `NONE`; dual-mode opening orders use the corresponding `LONG`/`SHORT` leg, and reduce-only orders close the opposite buy/sell leg. Close quantities are checked against a fresh matching position. If the position mode changed since the order was reviewed, submission is blocked for a new review. This manual-order handling does not extend dual-mode support to automated strategy execution.
+
 `GET /crossex/rule/symbols` is the runtime source of truth for venue/product availability and trading limits. The application does not infer that an instrument exists from a static venue list. Gate documents no CrossEx testnet, so execution is production-only.
 
 ## WebSocket boundary

@@ -271,6 +271,23 @@ app.post('/__e2e/fresh-quotes', async () => {
   return { ok: true };
 });
 
+// Synthetic manual-trading positions only; the E2E gateway never has real credentials.
+app.post('/__e2e/manual-positions', async () => {
+  database.prepare('DELETE FROM live_positions').run();
+  for (const [side, quantity] of [['long', '0.01'], ['short', '-0.03']]) {
+    insertPosition.run(`e2e-btc-${side}`, 'GATE_FUTURE_BTC_USDT', 'GATE', quantity,
+      '64000', '64000', '0', '0', '2030-01-01T00:00:00.000Z');
+  }
+  tradingSession.set('live');
+  return { ok: true };
+});
+
+app.delete('/__e2e/manual-positions', async () => {
+  database.prepare('DELETE FROM live_positions').run();
+  tradingSession.set('readonly');
+  return { ok: true };
+});
+
 app.post('/__e2e/grouped-positions', async () => {
   database.prepare('DELETE FROM live_positions').run();
   insertPosition.run(

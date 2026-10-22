@@ -798,6 +798,36 @@ describe('local backend', () => {
     expect(gateway.cancelledOrders).toEqual(['live-1']);
   });
 
+  it('exposes the actual position mode as a protected read without unlocking trading', async () => {
+    const { app, gateway, vault, tradingSession } = await createTestApp();
+    await vault.set(DEFAULT_CREDENTIAL_PROFILE, { apiKey: 'mode-test-key', apiSecret: 'mode-test-secret' });
+    const host = { host: '127.0.0.1:17840' };
+    const url = '/api/trading/position-mode/BINANCE_FUTURE_BTC_USDT';
+    vi.spyOn(gateway, 'queryAccount').mockResolvedValue({ ...accountFixture, position_mode: 'DUAL' });
+    expect((await app.inject({ method: 'GET', url, headers: host })).statusCode).toBe(403);
+    const response = await app.inject({ method: 'GET', url, headers: { ...host, 'x-gct-read-intent': 'position-mode' } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ symbol: 'BINANCE_FUTURE_BTC_USDT', positionMode: 'DUAL', accountMode: 'CROSS_EXCHANGE', exchangeType: 'CROSSEX' });
+    expect(response.headers['cache-control']).toBe('no-store, max-age=0');
+    expect(gateway.createdOrders).toEqual([]);
+    expect(gateway.leverageUpdates).toEqual([]);
+    expect(tradingSession.current).toBe('unset');
+  });
+
+  it('maps an HTTP manual order to the actual dual leg and blocks a stale reviewed mode', async () => {
+    const { app, gateway } = await createTestApp({ liveTradingEnabled: true });
+    vi.spyOn(gateway, 'queryAccount').mockResolvedValue({ ...accountFixture, position_mode: 'DUAL' });
+    const headers = { host: '127.0.0.1:17840', 'x-gct-trading-intent': 'place-order' };
+    const payload = { symbol: 'BINANCE_FUTURE_BTC_USDT', side: 'BUY', type: 'LIMIT', price: '1', quantity: '0.001', reduceOnly: false };
+    const stale = await app.inject({ method: 'POST', url: '/api/trading/orders', headers, payload: { ...payload, expectedPositionMode: 'SINGLE' } });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toEqual({ error: 'order_position_mode_changed' });
+    expect(gateway.createdOrders).toHaveLength(0);
+    const accepted = await app.inject({ method: 'POST', url: '/api/trading/orders', headers, payload: { ...payload, expectedPositionMode: 'DUAL' } });
+    expect(accepted.statusCode).toBe(200);
+    expect(gateway.createdOrders).toEqual([expect.objectContaining({ side: 'BUY', position_side: 'LONG', reduce_only: 'false' })]);
+  });
+
   it('reads leverage in locked mode and only updates it with explicit live intent', async () => {
     const { app, gateway, vault, tradingSession, database } = await createTestApp();
     const host = { host: '127.0.0.1:17840' };

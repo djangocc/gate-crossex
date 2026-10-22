@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { contiguousCandleTail, type CrossExRiskLimitTier } from '@gate-crossex/shared-types';
+import { contiguousCandleTail, manualOrderPositionSide, type CrossExRiskLimitTier } from '@gate-crossex/shared-types';
 import {
   api,
   ApiError,
@@ -223,6 +223,7 @@ function OrderBookPanel({ book, trades, liveMarket, quote, base, sizeMultiplier,
 }
 
 interface TradingViewProps {
+  accountProfileId?: string | null;
   asset: string;
   catalog: MarketCatalogAsset[] | null;
   onSelectAsset: (asset: string) => void;
@@ -247,7 +248,7 @@ interface TradingViewProps {
   onSetConfirmOrders: (value: boolean) => void;
 }
 
-export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tradingSnapshot, authenticatedPortfolio, balances, fees, orderBook, publicTrades, candleSeries, candleBackfilling, watchMarket, seedCandles, onTradingChanged, onPositionsRefresh, tradingMode, onOpenModeDialog, favorites, onToggleFavorite, confirmOrders, onSetConfirmOrders }: TradingViewProps) {
+export function TradingView({ accountProfileId, asset, catalog, onSelectAsset, marketSnapshot, tradingSnapshot, authenticatedPortfolio, balances, fees, orderBook, publicTrades, candleSeries, candleBackfilling, watchMarket, seedCandles, onTradingChanged, onPositionsRefresh, tradingMode, onOpenModeDialog, favorites, onToggleFavorite, confirmOrders, onSetConfirmOrders }: TradingViewProps) {
   const { language, theme, t } = useLanguage();
   const [timeframe, setTimeframe] = useState('1m');
   const [side, setSide] = useState<Side>('Buy');
@@ -264,6 +265,8 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   const [exchangeId, setExchangeId] = useState('gate');
   const [pendingExchangeId, setPendingExchangeId] = useState<string | null>(null);
   const [reduceOnly, setReduceOnly] = useState(false);
+  const [positionModeState, setPositionModeState] = useState<{ key: string; mode: 'SINGLE' | 'DUAL' | null } | null>(null);
+  const [positionModeRevision, setPositionModeRevision] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [chartTab, setChartTab] = useState<'chart' | 'overview'>('chart');
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
@@ -290,6 +293,14 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   const venueEntry = catalogAsset?.venues.find((item) => item.venue === exchangeId.toUpperCase()) ?? null;
   const exchange = exchanges.find((item) => item.id === exchangeId) ?? exchanges[0];
   const symbol = venueEntry?.symbol ?? crossExSymbol(exchangeId, asset);
+  const positionModeKey = `${symbol}:${accountProfileId ?? ''}:${tradingMode}:${positionModeRevision}`;
+  const positionMode = positionModeState?.key === positionModeKey ? positionModeState.mode : null;
+  const positionModeLabel = positionMode === 'DUAL' ? 'Dual position mode' : positionMode === 'SINGLE'
+    ? 'Single position mode' : positionModeState?.key === positionModeKey ? 'Unable to verify position mode' : 'Loading position mode…';
+  const positionSide = positionMode ? manualOrderPositionSide(positionMode, side === 'Buy' ? 'BUY' : 'SELL', reduceOnly) : null;
+  const buyActionLabel = reduceOnly ? 'Close short' : positionMode === 'DUAL' ? 'Open long' : 'Buy / Long';
+  const sellActionLabel = reduceOnly ? 'Close long' : positionMode === 'DUAL' ? 'Open short' : 'Sell / Short';
+  const orderActionLabel = side === 'Buy' ? buyActionLabel : sellActionLabel;
   const quote = venueEntry?.quote ?? quoteFor(exchangeId);
   const interval = TIMEFRAMES.find((item) => item.label === timeframe)?.interval ?? '1m';
   const candleKey = `${symbol}:${interval}`;
@@ -323,7 +334,8 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   const makerFeeText = makerFeeRate !== undefined ? `${(makerFeeRate * 100).toFixed(4)}%` : t('Exchange setting');
   const referenceCandle = chartReady ? hoveredCandle ?? candles[candles.length - 1] ?? null : null;
   const isFavorite = favorites.includes(symbol);
-  const portfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === symbol);
+  const portfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === symbol
+    && (positionMode !== 'DUAL' || position.positionSide === positionSide));
   const leverageText = currentLeverage ?? portfolioPosition?.leverage ?? instrument?.defaultLeverage ?? '1';
   const leverageCeiling = Math.max(1, Math.floor(Number(maxLeverage ?? portfolioPosition?.maxLeverage ?? leverageText) || 1));
   const leverageValue = Math.min(leverageCeiling, Math.max(1, Number(leverageText) || 1));
@@ -331,6 +343,10 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   const selectedMaxPositionValue = maxPositionValueAtLeverage(riskTiers, leverageValue);
   const existingSignedQuantity = signedPortfolioQuantity(portfolioPosition);
   const orderDirection = side === 'Buy' ? 1 : -1;
+  const runtimePosition = tradingSnapshot?.positions.find((position) => position.symbol === symbol
+    && (positionMode !== 'DUAL' || (positionSide === 'SHORT' ? Number(position.quantity) < 0 : Number(position.quantity) > 0)));
+  const closeSignedQuantity = portfolioPosition ? signedPortfolioQuantity(portfolioPosition) : Number(runtimePosition?.quantity ?? 0);
+  const closeableQuantity = closeSignedQuantity * orderDirection < 0 ? Math.abs(closeSignedQuantity) : 0;
   const riskMaximumQuantity = selectedMaxPositionValue !== null && maxQuantityReference > 0
     ? selectedMaxPositionValue / maxQuantityReference
     : null;
@@ -340,8 +356,7 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   const instrumentSizeCap = orderType === 'Market' ? instrument?.maxMarketSize : instrument?.maxLimitSize;
   const maxOrderQuantity = (() => {
     if (reduceOnly) {
-      const positionSize = Math.abs(Number(tradingSnapshot?.positions.find((position) => position.symbol === symbol)?.quantity ?? 0));
-      return floorToStep(positionSize, instrument?.lotSize ?? null);
+      return closeableQuantity > 0 ? floorToStep(closeableQuantity, instrument?.lotSize ?? null) : '';
     }
     const available = Number(availableBalance);
     if (availableBalance === null || !Number.isFinite(available) || available < 0 || maxQuantityReference <= 0) return '';
@@ -362,6 +377,9 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
     && (!riskTiersLoaded || selectedMaxPositionValue === null);
   const issues = [
     ...ticketValidationIssues,
+    ...(tradingMode === 'live' && !positionMode ? [t('Unable to verify position mode')] : []),
+    ...(reduceOnly && Number(amount) > 0 && Number(amount) > closeableQuantity
+      ? [t(closeableQuantity > 0 ? 'Close quantity exceeds the matching position' : 'No matching position to close')] : []),
     ...(riskLimitExceeded
       ? [`${t('Projected position exceeds the maximum at selected leverage')}: ${formatAmount(selectedMaxPositionValue ?? 0)} ${quote}`]
       : riskLimitUnavailable ? [t('Unable to verify max position at selected leverage')] : []),
@@ -445,7 +463,18 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   useEffect(() => {
     // Any change to what would be submitted closes an open confirmation dialog.
     setConfirming(false);
-  }, [side, orderType, price, amount, reduceOnly, exchangeId]);
+  }, [side, orderType, price, amount, reduceOnly, exchangeId, positionModeKey, positionMode]);
+
+  useEffect(() => {
+    if (tradingMode === 'unset') return;
+    let cancelled = false;
+    void api.positionMode(symbol).then((response) => {
+      if (!cancelled) setPositionModeState({ key: positionModeKey, mode: response.positionMode });
+    }).catch(() => {
+      if (!cancelled) setPositionModeState({ key: positionModeKey, mode: null });
+    });
+    return () => { cancelled = true; };
+  }, [symbol, positionModeKey, tradingMode]);
 
   useEffect(() => {
     if (!leverageOpen) return;
@@ -630,20 +659,31 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
   }
 
   async function submitOrder() {
-    if (submitting || issues.length > 0) return;
+    if (submitting || issues.length > 0 || !positionMode) return;
     setConfirming(false);
     setSubmitting(true);
     try {
       const order = await api.createOrder({
-        symbol: liveMarket?.symbol ?? symbol,
+        symbol,
         side: side === 'Buy' ? 'BUY' : 'SELL', type: orderType === 'Market' ? 'MARKET' : 'LIMIT',
         timeInForce: orderType === 'Market' ? 'IOC' : 'GTC', quantity: amount,
-        ...(orderType === 'Limit' ? { price } : {}), reduceOnly,
+        ...(orderType === 'Limit' ? { price } : {}), reduceOnly, expectedPositionMode: positionMode,
       });
       showNotice('ok', t('Execution update'), `${order.state}: ${t(side)} ${amount || '0'} ${asset} ${t('on')} ${exchange.name}`);
       await onTradingChanged();
     } catch (error) {
-      showNotice('error', t('Order rejected'), error instanceof ApiError ? error.message : t('Backend unavailable'));
+      const orderErrors: Record<string, string> = {
+        order_position_mode_unavailable: 'Unable to verify position mode',
+        order_position_mode_changed: 'Position mode changed. Review the order again.',
+        order_position_side_mismatch: 'Position side changed. Refresh positions and review the order.',
+        order_position_snapshot_unavailable: 'Position data unavailable',
+        reduce_only_position_unavailable: 'No matching position to close',
+        reduce_only_quantity_exceeds_position: 'Close quantity exceeds the matching position',
+      };
+      if (error instanceof ApiError && ['order_position_mode_changed', 'order_position_mode_unavailable'].includes(error.code)) {
+        setPositionModeRevision((value) => value + 1);
+      }
+      showNotice('error', t('Order rejected'), error instanceof ApiError ? t(orderErrors[error.code] ?? error.message) : t('Backend unavailable'));
     } finally {
       setSubmitting(false);
     }
@@ -710,7 +750,7 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
       <OrderBookPanel book={orderBook?.symbol === symbol ? orderBook : null} trades={publicTrades.symbol === symbol ? publicTrades.trades : []} liveMarket={liveMarket} quote={quote} base={asset} sizeMultiplier={sizeMultiplier} tickSize={instrument?.tickSize ?? null} />
 
       <aside className="order-panel terminal-panel">
-        <div className="trade-side-tabs"><button className={side === 'Buy' ? 'active buy' : ''} onClick={() => setSide('Buy')}>{t('Buy / Long')}</button><button className={side === 'Sell' ? 'active sell' : ''} onClick={() => setSide('Sell')}>{t('Sell / Short')}</button></div>
+        <div className="trade-side-tabs"><button className={side === 'Buy' ? 'active buy' : ''} onClick={() => setSide('Buy')}>{t(buyActionLabel)}</button><button className={side === 'Sell' ? 'active sell' : ''} onClick={() => setSide('Sell')}>{t(sellActionLabel)}</button></div>
         <div className="ticket-toolbar">
           <div className="order-type-tabs">{(['Limit', 'Market'] as OrderType[]).map((type) => <button className={orderType === type ? 'active' : ''} onClick={() => setOrderType(type)} key={type}>{t(type)}</button>)}</div>
           <div className="leverage-control" ref={leverageRef}>
@@ -748,10 +788,11 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
             <span>{t('Switch trading mode')}</span>
           </button>
           : <button className={side === 'Buy' ? 'submit-order buy' : 'submit-order sell'} onClick={requestSubmit} disabled={submitting || issues.length > 0}>
-            <strong>{submitting ? t('Submitting…') : `${t(side)} ${asset}`}</strong>
+            <strong>{submitting ? t('Submitting…') : `${t(orderActionLabel)} ${asset}`}</strong>
             <span>{t('on')} {exchange.name}</span>
           </button>}
         <dl className="order-summary">
+          <div><dt>{t('Position mode')}</dt><dd><button className="summary-leverage" onClick={() => setPositionModeRevision((value) => value + 1)} aria-label={t('Refresh position mode')}>{t(positionModeLabel)}</button></dd></div>
           <div><dt>{t(sharedMarginMode ? 'Shared margin' : 'Available balance')}</dt><dd>{displayedBalance} {availableBalanceUnit}</dd></div>
           <div><dt>{t('Max order quantity')}</dt><dd><button className="max-quantity" onClick={() => { if (maxOrderQuantity) { setAmount(maxOrderQuantity); setAllocation(100); } }} disabled={!maxOrderQuantity}>{maxOrderQuantity || '—'} {asset}</button></dd></div>
           <div><dt>{t('Leverage')}</dt><dd><button className="summary-leverage" onClick={openLeverageEditor}>{leverageValue}×</button></dd></div>
@@ -768,14 +809,16 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
       <section ref={confirmDialogRef} tabIndex={-1} className="confirm-order-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-order-title" onMouseDown={(event) => event.stopPropagation()}>
         <header>
           <div>
-            <p className={`eyebrow ${side === 'Buy' ? 'positive' : 'negative'}`}>{t(side === 'Buy' ? 'Buy / Long' : 'Sell / Short')}</p>
+            <p className={`eyebrow ${side === 'Buy' ? 'positive' : 'negative'}`}>{t(orderActionLabel)}</p>
             <h2 id="confirm-order-title">{t('Confirm order')}</h2>
             <span className="confirm-market">{marketSymbol(asset, quote, 'perpetual')} {t('Perpetual').toLowerCase()} · {exchange.name}</span>
           </div>
           <button className="disclaimer-close" aria-label={t('Close')} onClick={() => setConfirming(false)}>×</button>
         </header>
         <dl className="confirm-order-summary">
-          <div><dt>{t('Side')}</dt><dd className={side === 'Buy' ? 'positive' : 'negative'}>{t(side)} · {t(orderType)}</dd></div>
+          <div><dt>{t('Side')}</dt><dd className={side === 'Buy' ? 'positive' : 'negative'}>{t(orderActionLabel)} · {t(orderType)}</dd></div>
+          <div><dt>{t('Position mode')}</dt><dd>{t(positionModeLabel)}</dd></div>
+          {positionSide && positionSide !== 'NONE' && <div><dt>{t('Position side')}</dt><dd>{t(positionSide === 'LONG' ? 'Long' : 'Short')}</dd></div>}
           <div><dt>{t('Price')}</dt><dd>{orderType === 'Limit' ? `${price} ${quote}` : t('Market')}</dd></div>
           <div><dt>{t('Amount')}</dt><dd>{amount} {asset}</dd></div>
           <div><dt>{t('Total')}</dt><dd>≈ {total} {quote}</dd></div>
@@ -792,7 +835,7 @@ export function TradingView({ asset, catalog, onSelectAsset, marketSnapshot, tra
           <button className="confirm-back" data-dialog-autofocus onClick={() => setConfirming(false)}>{t('Go back')}</button>
           <button className={side === 'Buy' ? 'confirm-submit buy' : 'confirm-submit sell'} disabled={submitting}
             onClick={() => { if (skipFutureConfirmations) onSetConfirmOrders(false); void submitOrder(); }}>
-            <strong>{submitting ? t('Submitting…') : `${t(side)} ${amount} ${asset}`}</strong>
+            <strong>{submitting ? t('Submitting…') : `${t(orderActionLabel)} ${amount} ${asset}`}</strong>
             <span>{orderType === 'Limit' ? `@ ${price} ${quote}` : t('Market')} · {exchange.name}</span>
           </button>
         </div>

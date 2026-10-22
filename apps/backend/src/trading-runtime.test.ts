@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -51,11 +51,19 @@ class ScriptedGateway implements TradingCrossExGateway {
   positions: GateCrossExPortfolio['positions'] = [];
   leverage = '20';
   maxRiskPositionValue = '10000';
+  account: GateCrossExAccount = {
+    available_margin: '1000', margin_balance: '1000', initial_margin: '0', maintenance_margin: '0',
+    initial_margin_rate: '0', maintenance_margin_rate: '0', position_mode: 'SINGLE',
+    account_mode: 'CROSS_EXCHANGE', exchange_type: 'CROSSEX', update_time: '1783600000000', assets: [],
+  };
   private sequence = 0;
 
   constructor(private readonly script: GatewayScript = {}) {}
 
-  async queryAccount(): Promise<GateCrossExAccount> { throw new GateApiError(0, 'NOT_SCRIPTED'); }
+  async queryAccount(_credentials: GateCredentials, exchangeType?: string): Promise<GateCrossExAccount> {
+    void exchangeType;
+    return this.account;
+  }
   async queryPositions(): Promise<GateCrossExPortfolio['positions']> { return this.positions; }
   async queryPortfolio(): Promise<GateCrossExPortfolio> { throw new GateApiError(0, 'NOT_SCRIPTED'); }
   async querySymbols(): Promise<GateCrossExSymbol[]> { return []; }
@@ -97,6 +105,7 @@ class ScriptedGateway implements TradingCrossExGateway {
 }
 
 interface Harness {
+  session: TradingSession;
   database: Database.Database;
   runtime: TradingRuntime;
   gateway: ScriptedGateway;
@@ -121,7 +130,7 @@ async function createHarness(script: GatewayScript = {}, options: TradingRuntime
     submitResolvePollMs: options.submitResolvePollMs ?? 10,
     submitResolveMaxAttempts: options.submitResolveMaxAttempts ?? 50,
   });
-  const harness = { database, runtime, gateway, directory };
+  const harness = { database, runtime, gateway, directory, session };
   harnesses.push(harness);
   return harness;
 }
@@ -259,6 +268,145 @@ describe('trading runtime order submission', () => {
   it('creates no local rows while live trading is locked', async () => {
     const { runtime } = await createHarness({}, { liveTradingEnabled: false });
     await expect(runtime.createOrder(marketOrderInput)).rejects.toMatchObject({ code: 'live_trading_locked' });
+    expect(runtime.listOrders()).toHaveLength(0);
+  });
+});
+
+function positionFixture(positionSide: string, quantity: string): GateCrossExPortfolio['positions'][number] {
+  return {
+    position_id: `position-${positionSide}`, symbol: marketOrderInput.symbol, position_side: positionSide,
+    position_qty: quantity, initial_margin: '0', maintenance_margin: '0', position_value: '0', upnl: '0',
+    upnl_rate: '0', entry_price: '100000', mark_price: '100000', leverage: '20', max_leverage: '20',
+    risk_limit: '10000', fee: '0', funding_fee: '0', funding_time: '0', create_time: '1783600000000',
+    update_time: '1783600000000', closed_pnl: '0',
+  };
+}
+
+describe('manual position mode and close preflight', () => {
+  it.each([
+    ['SINGLE', 'BUY', false, 'NONE'], ['SINGLE', 'SELL', false, 'NONE'],
+    ['SINGLE', 'BUY', true, 'NONE'], ['SINGLE', 'SELL', true, 'NONE'],
+    ['DUAL', 'BUY', false, 'LONG'], ['DUAL', 'SELL', false, 'SHORT'],
+    ['DUAL', 'BUY', true, 'SHORT'], ['DUAL', 'SELL', true, 'LONG'],
+  ] as const)('routes %s %s reduceOnly=%s to %s', async (mode, side, reduceOnly, positionSide) => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = mode;
+    gateway.positions = mode === 'DUAL'
+      ? [positionFixture('LONG', '1'), positionFixture('SHORT', '2')]
+      : [positionFixture('NONE', side === 'BUY' ? '-1' : '1')];
+    await runtime.createOrder({ ...marketOrderInput, side, reduceOnly, expectedPositionMode: mode });
+    expect(gateway.createRequests).toEqual([expect.objectContaining({
+      side, position_side: positionSide, reduce_only: String(reduceOnly),
+    })]);
+  });
+
+  it('does not offset a dual opening order against the opposite leg for the tier check', async () => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = 'DUAL';
+    gateway.positions = [positionFixture('SHORT', '0.1'), positionFixture('LONG', '0.09')];
+    await expect(runtime.createOrder({ ...marketOrderInput, quantity: '0.02' }, undefined, '100000'))
+      .rejects.toMatchObject({ code: 'order_position_exceeds_leverage_limit' });
+    expect(gateway.createRequests).toHaveLength(0);
+    expect(runtime.listOrders()).toHaveLength(0);
+  });
+
+  it('keeps the signed NONE quantity when reviewing a single-mode order', async () => {
+    const { runtime, gateway } = await createHarness();
+    gateway.maxRiskPositionValue = '5000';
+    gateway.positions = [positionFixture('NONE', '-0.09')];
+    await runtime.createOrder({ ...marketOrderInput, quantity: '0.05' }, undefined, '100000');
+    expect(gateway.createRequests[0]?.position_side).toBe('NONE');
+  });
+
+  it.each(['BUY', 'SELL'] as const)('bounds a reduce-only %s by the matching dual leg', async (side) => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = 'DUAL';
+    gateway.positions = [positionFixture(side === 'BUY' ? 'LONG' : 'SHORT', '10'),
+      positionFixture(side === 'BUY' ? 'SHORT' : 'LONG', '0.02')];
+    await expect(runtime.createOrder({ ...marketOrderInput, side, quantity: '0.03', reduceOnly: true }))
+      .rejects.toMatchObject({ code: 'reduce_only_quantity_exceeds_position', statusCode: 409 });
+    expect(gateway.createRequests).toHaveLength(0);
+  });
+
+  it.each(['DUAL', 'SINGLE'] as const)('rejects a close with no matching %s position', async (mode) => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = mode;
+    gateway.positions = [positionFixture(mode === 'DUAL' ? 'LONG' : 'NONE', '10')];
+    await expect(runtime.createOrder({ ...marketOrderInput, reduceOnly: true }))
+      .rejects.toMatchObject({ code: 'reduce_only_position_unavailable', statusCode: 409 });
+    expect(gateway.createRequests).toHaveLength(0);
+  });
+
+  it('rejects an explicitly selected leg that disagrees with the close operation', async () => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = 'DUAL';
+    await expect(runtime.createOrder({ ...marketOrderInput, reduceOnly: true, positionSide: 'LONG' }))
+      .rejects.toMatchObject({ code: 'order_position_side_mismatch', statusCode: 409 });
+    expect(gateway.createRequests).toHaveLength(0);
+  });
+
+  it('blocks a reviewed order after the account changes position mode', async () => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = 'DUAL';
+    await expect(runtime.createOrder({ ...marketOrderInput, expectedPositionMode: 'SINGLE' }))
+      .rejects.toMatchObject({ code: 'order_position_mode_changed', statusCode: 409 });
+    expect(gateway.createRequests).toHaveLength(0);
+  });
+
+  it('reads the selected venue mode for an isolated-exchange account', async () => {
+    const { runtime, gateway } = await createHarness();
+    const query = vi.spyOn(gateway, 'queryAccount').mockImplementation(async (_credentials, exchange) => ({
+      ...gateway.account, account_mode: 'ISOLATED_EXCHANGE', exchange_type: exchange ?? 'GATE',
+      position_mode: exchange === 'BINANCE' ? 'DUAL' : 'SINGLE',
+    }));
+    await runtime.createOrder(marketOrderInput);
+    expect(query.mock.calls.map((call) => call[1])).toEqual([undefined, 'BINANCE']);
+    expect(gateway.createRequests[0]?.position_side).toBe('LONG');
+  });
+
+  it('retries a venue-scoped query when the unscoped account endpoint is unavailable', async () => {
+    const { runtime, gateway } = await createHarness();
+    vi.spyOn(gateway, 'queryAccount').mockImplementation(async (_credentials, exchange) => {
+      if (!exchange) throw new GateApiError(400, 'EXCHANGE_TYPE_REQUIRED');
+      return { ...gateway.account, account_mode: 'ISOLATED_EXCHANGE', exchange_type: exchange, position_mode: 'DUAL' };
+    });
+    await runtime.createOrder(marketOrderInput);
+    expect(gateway.createRequests[0]?.position_side).toBe('LONG');
+  });
+
+  it.each(['UNKNOWN', ''])('fails closed for an unsupported position mode %s', async (mode) => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = mode;
+    await expect(runtime.createOrder(marketOrderInput)).rejects.toMatchObject({ code: 'order_position_mode_unavailable' });
+    expect(gateway.createRequests).toHaveLength(0);
+  });
+
+  it.each([
+    [0, 'order_position_mode_unavailable', 503], [429, 'order_position_preflight_rate_limited', 429],
+  ] as const)('does not submit when the account query fails with status %s', async (status, code, statusCode) => {
+    const { runtime, gateway } = await createHarness();
+    vi.spyOn(gateway, 'queryAccount').mockRejectedValue(new GateApiError(status, 'NETWORK_ERROR'));
+    await expect(runtime.createOrder(marketOrderInput)).rejects.toMatchObject({ code, statusCode });
+    expect(gateway.createRequests).toHaveLength(0);
+    expect(runtime.listOrders()).toHaveLength(0);
+  });
+
+  it('does not submit a close when its fresh position snapshot is unavailable', async () => {
+    const { runtime, gateway } = await createHarness();
+    vi.spyOn(gateway, 'queryPositions').mockRejectedValue(new GateApiError(0, 'NETWORK_ERROR'));
+    await expect(runtime.createOrder({ ...marketOrderInput, reduceOnly: true }))
+      .rejects.toMatchObject({ code: 'order_position_snapshot_unavailable' });
+    expect(gateway.createRequests).toHaveLength(0);
+  });
+
+  it('respects a trading lock applied while the account query was in flight', async () => {
+    const { runtime, gateway, session } = await createHarness();
+    vi.spyOn(gateway, 'queryAccount').mockImplementation(async () => {
+      session.set('readonly');
+      return gateway.account;
+    });
+    await expect(runtime.createOrder(marketOrderInput)).rejects.toMatchObject({ code: 'live_trading_locked' });
+    expect(gateway.createRequests).toHaveLength(0);
     expect(runtime.listOrders()).toHaveLength(0);
   });
 });

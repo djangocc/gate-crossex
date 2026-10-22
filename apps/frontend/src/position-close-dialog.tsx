@@ -88,9 +88,11 @@ export function PositionCloseDialog({ targets, portfolio, instruments, onDismiss
     const positionMode = portfolio?.snapshot.account.positionMode;
     if (splitClose) {
       const closePlanTargets = selectedTargets.map((target) => {
-        const portfolioPosition = portfolio?.snapshot.futuresPositions?.find((item) => item.positionId === target.positionId || item.symbol === target.symbol);
         const signedQuantity = Number(target.quantity);
         const inferredSide = signedQuantity >= 0 ? 'LONG' : 'SHORT';
+        const positions = portfolio?.snapshot.futuresPositions ?? [];
+        const portfolioPosition = positions.find((item) => item.positionId === target.positionId && item.symbol === target.symbol)
+          ?? positions.find((item) => item.symbol === target.symbol && (positionMode !== 'DUAL' || item.positionSide === inferredSide));
         const positionSide: 'NONE' | 'LONG' | 'SHORT' = positionMode === 'DUAL'
           ? (portfolioPosition?.positionSide === 'LONG' || portfolioPosition?.positionSide === 'SHORT' ? portfolioPosition.positionSide : inferredSide)
           : 'NONE';
@@ -131,9 +133,11 @@ export function PositionCloseDialog({ targets, portfolio, instruments, onDismiss
     }
 
     const results = await Promise.allSettled(selectedTargets.map((target) => {
-      const portfolioPosition = portfolio?.snapshot.futuresPositions?.find((item) => item.positionId === target.positionId || item.symbol === target.symbol);
       const signedQuantity = Number(target.quantity);
       const inferredSide = signedQuantity >= 0 ? 'LONG' : 'SHORT';
+      const positions = portfolio?.snapshot.futuresPositions ?? [];
+      const portfolioPosition = positions.find((item) => item.positionId === target.positionId && item.symbol === target.symbol)
+        ?? positions.find((item) => item.symbol === target.symbol && (positionMode !== 'DUAL' || item.positionSide === inferredSide));
       const positionSide = positionMode === 'DUAL'
         ? (portfolioPosition?.positionSide === 'LONG' || portfolioPosition?.positionSide === 'SHORT' ? portfolioPosition.positionSide : inferredSide)
         : 'NONE';
@@ -145,6 +149,7 @@ export function PositionCloseDialog({ targets, portfolio, instruments, onDismiss
         quantity: quantityByTarget.get(target.id) ?? '0',
         reduceOnly: true,
         positionSide,
+        ...(positionMode === 'SINGLE' || positionMode === 'DUAL' ? { expectedPositionMode: positionMode } : {}),
       });
     }));
     const failures = results.filter((result) => result.status === 'rejected');

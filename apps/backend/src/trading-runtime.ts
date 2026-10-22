@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { Decimal } from 'decimal.js';
 import { z } from 'zod';
-import type { LiveBalance, PortfolioFill, PortfolioFuturesPosition, UnresolvedOrder } from '@gate-crossex/shared-types';
-import { DEFAULT_CREDENTIAL_PROFILE, type CredentialVault } from './credential-vault.js';
-import { CrossExOrderRequestSchema, GateApiError, type GateCrossExAccount, type GateCrossExRiskLimit, type ReadOnlyCrossExGateway, type TradingCrossExGateway } from './crossex-client.js';
+import { manualOrderPositionSide, PositionModeResponseSchema, type PositionModeResponse, type LiveBalance, type PortfolioFill, type PortfolioFuturesPosition, type UnresolvedOrder } from '@gate-crossex/shared-types';
+import { DEFAULT_CREDENTIAL_PROFILE, type CredentialVault, type GateCredentials } from './credential-vault.js';
+import { CrossExOrderRequestSchema, GateApiError, type GateCrossExAccount, type GateCrossExPosition, type GateCrossExRiskLimit, type ReadOnlyCrossExGateway, type TradingCrossExGateway } from './crossex-client.js';
 import type { PrivateCrossExEvent } from './private-stream.js';
 import type { TradingSession } from './trading-session.js';
 
@@ -12,9 +12,10 @@ const decimalText = z.string().regex(/^\d+(?:\.\d+)?$/).refine((value) => new De
 /** Premium levels may be negative (an ADR trading at a discount), so sign is allowed. */
 const signedDecimalText = z.string().regex(/^-?\d+(?:\.\d+)?$/);
 const venue = z.enum(['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER']);
+const futuresSymbol = z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/);
 
 const CreateOrderInputSchema = z.object({
-  symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/),
+  symbol: futuresSymbol,
   side: z.enum(['BUY', 'SELL']),
   type: z.enum(['LIMIT', 'MARKET']),
   timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'POC']).default('GTC'),
@@ -22,6 +23,7 @@ const CreateOrderInputSchema = z.object({
   price: decimalText.optional(),
   reduceOnly: z.boolean().default(false),
   positionSide: z.enum(['NONE', 'LONG', 'SHORT']).default('NONE'),
+  expectedPositionMode: z.enum(['SINGLE', 'DUAL']).optional(),
 }).superRefine((value, context) => {
   if (value.type === 'LIMIT' && !value.price) context.addIssue({ code: 'custom', path: ['price'], message: 'price is required for limit orders' });
 });
@@ -735,6 +737,43 @@ export class TradingRuntime {
     }
   }
 
+  async queryPositionMode(symbol: string): Promise<PositionModeResponse> {
+    futuresSymbol.parse(symbol);
+    const credentials = await this.vault.get(DEFAULT_CREDENTIAL_PROFILE);
+    if (!credentials) throw new TradingRuntimeError('credential_not_configured', 409);
+    return this.readPositionMode(credentials, symbol);
+  }
+
+  private async readPositionMode(credentials: GateCredentials, symbol: string): Promise<PositionModeResponse> {
+    const exchange = venueFromSymbol(symbol);
+    let account: GateCrossExAccount;
+    try {
+      try {
+        account = await this.gateway.queryAccount(credentials);
+      } catch (error) {
+        if (!(error instanceof GateApiError) || ![400, 422].includes(error.statusCode)) throw error;
+        account = await this.gateway.queryAccount(credentials, exchange);
+      }
+      if (account.account_mode === 'ISOLATED_EXCHANGE' && account.exchange_type !== exchange) {
+        account = await this.gateway.queryAccount(credentials, exchange);
+      }
+    } catch (error) {
+      if (error instanceof GateApiError && error.statusCode === 429) {
+        throw new TradingRuntimeError('order_position_preflight_rate_limited', 429);
+      }
+      throw new TradingRuntimeError('order_position_mode_unavailable', 503);
+    }
+    const parsed = PositionModeResponseSchema.safeParse({
+      symbol, positionMode: account.position_mode, accountMode: account.account_mode, exchangeType: account.exchange_type,
+    });
+    if (!parsed.success
+      || (account.account_mode === 'ISOLATED_EXCHANGE' && account.exchange_type !== exchange)
+      || (account.account_mode === 'CROSS_EXCHANGE' && account.exchange_type !== 'CROSSEX')) {
+      throw new TradingRuntimeError('order_position_mode_unavailable', 503);
+    }
+    return parsed.data;
+  }
+
   async createOrder(
     raw: unknown,
     metadata?: PlaceOrderMetadata,
@@ -756,6 +795,50 @@ export class TradingRuntime {
     if (!credentials) throw new TradingRuntimeError('credential_not_configured', 409);
     const tradingGateway = this.gateway as Partial<TradingCrossExGateway>;
     if (!tradingGateway.createOrder) throw new TradingRuntimeError('live_gateway_unavailable', 503);
+    let positionMode: PositionModeResponse['positionMode'] | undefined;
+    if (!metadata) {
+      ({ positionMode } = await this.readPositionMode(credentials, input.symbol));
+      if (input.expectedPositionMode && input.expectedPositionMode !== positionMode) {
+        throw new TradingRuntimeError('order_position_mode_changed', 409);
+      }
+      const positionSide = manualOrderPositionSide(positionMode, input.side, input.reduceOnly);
+      if (input.positionSide !== 'NONE' && input.positionSide !== positionSide) {
+        throw new TradingRuntimeError('order_position_side_mismatch', 409);
+      }
+      input.positionSide = positionSide;
+      if (input.reduceOnly) {
+        let positions: GateCrossExPosition[];
+        try {
+          positions = await this.gateway.queryPositions(credentials);
+        } catch (error) {
+          if (error instanceof GateApiError && error.statusCode === 429) {
+            throw new TradingRuntimeError('order_position_preflight_rate_limited', 429);
+          }
+          throw new TradingRuntimeError('order_position_snapshot_unavailable', 503);
+        }
+        const matching = positions.filter((position) => position.symbol === input.symbol
+          && (positionMode === 'SINGLE' || position.position_side === positionSide));
+        if (matching.length > 1) throw new TradingRuntimeError('order_position_snapshot_unavailable', 503);
+        const position = matching[0];
+        if (!position) throw new TradingRuntimeError('reduce_only_position_unavailable', 409);
+        let signedQuantity: Decimal;
+        try {
+          const raw = new Decimal(position.position_qty);
+          signedQuantity = position.position_side === 'SHORT' ? raw.abs().negated()
+            : position.position_side === 'LONG' ? raw.abs() : raw;
+          if (!signedQuantity.isFinite()) throw new Error('invalid position quantity');
+        } catch {
+          throw new TradingRuntimeError('order_position_snapshot_unavailable', 503);
+        }
+        const direction = input.side === 'BUY' ? 1 : -1;
+        if (signedQuantity.isZero() || signedQuantity.mul(direction).gte(0)) {
+          throw new TradingRuntimeError('reduce_only_position_unavailable', 409);
+        }
+        if (new Decimal(input.quantity).gt(signedQuantity.abs())) {
+          throw new TradingRuntimeError('reduce_only_quantity_exceeds_position', 409);
+        }
+      }
+    }
     if (!metadata && referencePrice !== undefined && !input.reduceOnly) {
       if (!referencePrice || !decimalText.safeParse(referencePrice).success
         || !tradingGateway.queryPositions || !tradingGateway.queryLeverages) {
@@ -781,17 +864,23 @@ export class TradingRuntime {
         ? maxRiskPositionValueAtLeverage(limits.find((limit) => limit.symbol === input.symbol), new Decimal(leverage))
         : null;
       if (!maxPositionValue) throw new TradingRuntimeError('order_position_limit_unavailable', 503);
-      const existingPosition = positions.find((position) => position.symbol === input.symbol);
+      const existingPosition = positions.find((position) => position.symbol === input.symbol
+        && (positionMode === 'SINGLE' || position.position_side === input.positionSide));
       const existingQuantity = (() => {
         if (!existingPosition) return new Decimal(0);
-        const quantity = new Decimal(existingPosition.position_qty).abs();
-        return existingPosition.position_side.toUpperCase() === 'SHORT' ? quantity.negated() : quantity;
+        const quantity = new Decimal(existingPosition.position_qty);
+        return existingPosition.position_side === 'SHORT' ? quantity.abs().negated()
+          : existingPosition.position_side === 'LONG' ? quantity.abs() : quantity;
       })();
       const plannedQuantity = new Decimal(input.quantity).mul(input.side === 'BUY' ? 1 : -1);
       const projectedPositionValue = existingQuantity.plus(plannedQuantity).abs().mul(referencePrice);
       if (projectedPositionValue.gt(maxPositionValue)) {
         throw new TradingRuntimeError('order_position_exceeds_leverage_limit', 409);
       }
+    }
+    // The user may lock trading while the fresh account/position checks are in flight.
+    if (!this.session.liveTradingEnabled && !metadata?.riskReducing) {
+      throw new TradingRuntimeError('live_trading_locked', 403);
     }
     const clientOrderId = `gct-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const gateInput = CrossExOrderRequestSchema.parse({ text: clientOrderId, symbol: input.symbol, side: input.side,

@@ -16,6 +16,7 @@ import {
   InstrumentsResponseSchema,
   LeverageResponseSchema,
   LeverageUpdateResponseSchema,
+  PositionModeResponseSchema,
   MarketCatalogResponseSchema,
   MarketSizeUnitsSchema,
   MarketSnapshotSchema,
@@ -328,10 +329,14 @@ export const api = {
     price?: string;
     reduceOnly: boolean;
     positionSide?: 'NONE' | 'LONG' | 'SHORT';
+    expectedPositionMode?: 'SINGLE' | 'DUAL';
   }) => request(ExecutionOrderSchema, '/api/trading/orders', {
     method: 'POST',
     headers: { 'x-gct-trading-intent': 'place-order' },
     body: JSON.stringify(body),
+  }),
+  positionMode: (symbol: string) => request(PositionModeResponseSchema, `/api/trading/position-mode/${encodeURIComponent(symbol)}`, {
+    headers: { 'x-gct-read-intent': 'position-mode' },
   }),
   cancelOrder: (id: string) => request(ExecutionOrderSchema, `/api/trading/orders/${encodeURIComponent(id)}`, {
     method: 'DELETE',
