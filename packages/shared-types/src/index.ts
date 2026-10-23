@@ -344,11 +344,53 @@ export const CrossExAccountBookRecordSchema = z.object({
 });
 export type CrossExAccountBookRecord = z.infer<typeof CrossExAccountBookRecordSchema>;
 
+export const CrossExHistoryOrderSchema = z.object({
+  id: z.string(), text: z.string(), symbol: z.string(), venue: z.string(),
+  side: z.string(), type: z.string(), attribute: z.string(), positionSide: z.string(),
+  quantity: z.string(), executedQuantity: z.string(), price: z.string().nullable(),
+  executedAvgPrice: z.string(), fee: z.string(), feeCoin: z.string(),
+  reduceOnly: z.boolean(), state: z.string(), reason: z.string(),
+  createdAt: z.string(), updatedAt: z.string(),
+});
+export type CrossExHistoryOrder = z.infer<typeof CrossExHistoryOrderSchema>;
+export const CrossExHistoryOrdersResponseSchema = z.object({
+  items: z.array(CrossExHistoryOrderSchema),
+  fetchedAt: z.string(),
+  pagination: z.object({
+    page: z.number().int().min(1), limit: z.number().int().min(1).max(1000),
+    to: z.number().int().min(0), hasMore: z.boolean(),
+  }),
+});
+export type CrossExHistoryOrdersResponse = z.infer<typeof CrossExHistoryOrdersResponseSchema>;
+
+export const CrossExHistoryPositionSchema = z.object({
+  id: z.string(), symbol: z.string(), venue: z.string(), positionSide: z.string(), closedType: z.string(),
+  openAvgPrice: z.string(), closedAvgPrice: z.string(), closedQuantity: z.string(),
+  maxQuantity: z.string(), closedValue: z.string(), realizedPnl: z.string(),
+  fee: z.string().nullable(), liquidationFee: z.string().nullable(), fundingFee: z.string().nullable(),
+  netPnl: z.string().nullable(), settlementCoin: z.string(),
+  createdAt: z.string(), updatedAt: z.string(),
+});
+export type CrossExHistoryPosition = z.infer<typeof CrossExHistoryPositionSchema>;
+export const CrossExHistoryPositionsResponseSchema = z.object({
+  items: z.array(CrossExHistoryPositionSchema), fetchedAt: z.string(),
+  pagination: z.object({
+    page: z.number().int().min(1), limit: z.number().int().min(1).max(1000),
+    to: z.number().int().min(0), hasMore: z.boolean(),
+  }),
+});
+export type CrossExHistoryPositionsResponse = z.infer<typeof CrossExHistoryPositionsResponseSchema>;
+
 export const CrossExPortfolioActivityResponseSchema = z.object({
   transfers: z.array(CrossExTransferRecordSchema),
   accountBook: z.array(CrossExAccountBookRecordSchema),
   fundingFees: z.array(CrossExAccountBookRecordSchema),
   fetchedAt: z.string(),
+  pagination: z.object({
+    page: z.number().int().min(1),
+    to: z.number().int().min(0),
+    hasMore: z.object({ transfers: z.boolean(), accountBook: z.boolean(), fundingFees: z.boolean() }),
+  }).optional(),
 });
 export type CrossExPortfolioActivityResponse = z.infer<typeof CrossExPortfolioActivityResponseSchema>;
 

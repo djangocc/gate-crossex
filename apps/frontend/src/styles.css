@@ -2221,3 +2221,43 @@ html[data-theme='light'] .activity-message button { border-color: #cbd6de; color
 
 /* Keep contract options above both exchange controls in the market panel. */
 .strategy-market-panel > .strategy-panel-head { position: relative; z-index: 40; }
+
+.activity-card .execution-pagination .page-size { color: var(--text); }
+.activity-history-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.activity-history-controls button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--green); background: var(--panel); cursor: pointer; }
+.activity-history-controls button:disabled { opacity: .6; cursor: wait; }
+
+/* Account history keeps batches readable without expanding the whole page. */
+.activity-toolbar { flex-wrap: wrap; }
+.activity-tabs { flex-wrap: wrap; }
+.activity-card .activity-table-wrap { max-height: 600px; }
+.activity-card .activity-reference { max-width: none; user-select: text; }
+.history-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border-bottom: 1px solid var(--line); }
+.history-filters label { display: grid; gap: 6px; color: var(--muted); font-size: var(--text-caption); }
+.history-filters .history-symbol { flex: 1 1 240px; }
+.history-filters input, .history-filters select, .history-search input { min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--panel); font: inherit; }
+.history-filters button, .history-error button { height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--panel); cursor: pointer; }
+.history-filters button:disabled { opacity: .5; cursor: default; }
+.history-search { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; color: var(--muted); font-size: var(--text-caption); }
+.history-search input { flex: 1 1 280px; }
+.history-search-note { padding: 0 12px; color: var(--muted); font-size: var(--text-caption); }
+.history-error { padding: 10px 12px; color: var(--red); font-size: var(--text-small); }
+.history-order-table { min-width: 1550px; }
+.history-order-table .history-order-reason small { max-width: 320px; white-space: normal; overflow-wrap: anywhere; }
+.history-order-table td { font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+  .activity-toolbar > input { width: 100%; }
+  .history-filters label { flex: 1 1 180px; }
+  .history-filters input, .history-filters select { width: 100%; }
+  .activity-footer { flex-wrap: wrap; padding-block: 8px; }
+}
+
+.history-search select { height: 32px; max-width: 100%; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--panel); font: inherit; }
+.history-position-table { min-width: 1280px; font-variant-numeric: tabular-nums; }
+.history-position-table td:first-child .venue-cell { display: flex; justify-content: flex-start; margin-top: 5px; }
+.history-position-table td.positive > strong { color: var(--green); }
+.history-position-table td.negative > strong { color: var(--red); }
+.history-detail-button, .position-history-details > header button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--panel); cursor: pointer; }
+.position-history-details { min-width: 0; margin-top: 16px; border-top: 2px solid var(--line); }
+.position-history-details > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; color: var(--text); font-size: var(--text-small); }
+.position-history-details > header strong { overflow-wrap: anywhere; }

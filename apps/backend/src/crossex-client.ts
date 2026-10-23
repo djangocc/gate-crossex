@@ -16,6 +16,8 @@ const ADL_RANK_ENDPOINT = '/crossex/adl_rank';
 const MARGIN_POSITIONS_ENDPOINT = '/crossex/margin_positions';
 const OPEN_ORDERS_ENDPOINT = '/crossex/open_orders';
 const HISTORY_TRADES_ENDPOINT = '/crossex/history_trades';
+const HISTORY_ORDERS_ENDPOINT = '/crossex/history_orders';
+const HISTORY_POSITIONS_ENDPOINT = '/crossex/history_positions';
 const ORDERS_ENDPOINT = '/crossex/orders';
 const LEVERAGE_ENDPOINT = '/crossex/positions/leverage';
 const FEE_ENDPOINT = '/crossex/fee';
@@ -107,6 +109,20 @@ const GatePositionSchema = z.object({
   funding_time: z.string(), create_time: z.string(), update_time: z.string(), closed_pnl: z.string(),
 });
 export type GateCrossExPosition = z.infer<typeof GatePositionSchema>;
+
+const historyDecimal = z.string().regex(/^-?\d+(?:\.\d+)?$/);
+const GateHistoricalPositionSchema = z.object({
+  position_id: z.string(), symbol: z.string(), position_side: z.string(), closed_type: z.string(),
+  open_avg_price: historyDecimal, closed_avg_price: historyDecimal,
+  closed_qty: historyDecimal, max_position_qty: historyDecimal, closed_value: historyDecimal,
+  closed_pnl: historyDecimal,
+  fee: historyDecimal.nullish().transform((value) => value ?? null),
+  liq_fee: historyDecimal.nullish().transform((value) => value ?? null),
+  funding_fee: historyDecimal.nullish().transform((value) => value ?? null),
+  create_time: z.string(), update_time: z.string(),
+});
+export type GateHistoricalPosition = z.infer<typeof GateHistoricalPositionSchema>;
+export type HistoryPositionQuery = { symbol?: string; from?: number; to: number; page: number; limit: number };
 
 const GateAdlRankSchema = z.object({
   user_id: z.string().optional(),
@@ -269,8 +285,10 @@ export interface PortfolioOperationsCrossExGateway {
   querySpotAccounts(credentials: GateCredentials): Promise<GateSpotAccount[]>;
   queryTransferCoins(coin?: string): Promise<GateTransferCoin[]>;
   createTransfer(credentials: GateCredentials, transfer: CrossExTransferRequest): Promise<GateTransferResponse>;
-  queryTransfers(credentials: GateCredentials, query: { coin?: string; limit: number }): Promise<GateTransferRecord[]>;
-  queryAccountBook(credentials: GateCredentials, query: { coin?: string; limit: number; statementType?: string }): Promise<GateAccountBookRecord[]>;
+  queryTransfers(credentials: GateCredentials, query: { coin?: string; limit: number; page?: number; to?: number }): Promise<GateTransferRecord[]>;
+  queryAccountBook(credentials: GateCredentials, query: { coin?: string; limit: number; statementType?: string; page?: number; to?: number }): Promise<GateAccountBookRecord[]>;
+  queryHistoryOrders(credentials: GateCredentials, query: { symbol?: string; from?: number; to: number; attributes?: string; page: number; limit: number }): Promise<GateCrossExOrder[]>;
+  queryHistoryPositions(credentials: GateCredentials, query: HistoryPositionQuery): Promise<GateHistoricalPosition[]>;
 }
 
 export class GateApiError extends Error {
@@ -498,12 +516,13 @@ export class GateCrossExClient implements TradingCrossExGateway, PortfolioOperat
 
   async queryTransfers(
     credentials: GateCredentials,
-    query: { coin?: string; limit: number },
+    query: { coin?: string; limit: number; page?: number; to?: number },
   ): Promise<GateTransferRecord[]> {
     const queryString = new URLSearchParams({
       ...(query.coin ? { coin: query.coin } : {}),
-      page: '1',
+      page: String(query.page ?? 1),
       limit: String(query.limit),
+      ...(query.to !== undefined ? { to: String(query.to) } : {}),
     }).toString();
     return this.signedRequest(
       'GET', TRANSFERS_ENDPOINT, queryString, '', credentials,
@@ -513,17 +532,48 @@ export class GateCrossExClient implements TradingCrossExGateway, PortfolioOperat
 
   async queryAccountBook(
     credentials: GateCredentials,
-    query: { coin?: string; limit: number; statementType?: string },
+    query: { coin?: string; limit: number; statementType?: string; page?: number; to?: number },
   ): Promise<GateAccountBookRecord[]> {
     const queryString = new URLSearchParams({
       ...(query.coin ? { coin: query.coin } : {}),
       ...(query.statementType ? { statement_type: query.statementType } : {}),
-      page: '1',
+      page: String(query.page ?? 1),
       limit: String(query.limit),
+      ...(query.to !== undefined ? { to: String(query.to) } : {}),
     }).toString();
     return this.signedRequest(
       'GET', ACCOUNT_BOOK_ENDPOINT, queryString, '', credentials,
       z.array(GateAccountBookRecordSchema), 'INVALID_ACCOUNT_BOOK_RESPONSE', 'normal',
+    );
+  }
+
+  async queryHistoryOrders(
+    credentials: GateCredentials,
+    query: { symbol?: string; from?: number; to: number; attributes?: string; page: number; limit: number },
+  ): Promise<GateCrossExOrder[]> {
+    const queryString = new URLSearchParams({
+      page: String(query.page), limit: String(query.limit),
+      ...(query.symbol ? { symbol: query.symbol } : {}),
+      ...(query.from !== undefined ? { from: String(query.from) } : {}),
+      to: String(query.to),
+      ...(query.attributes ? { attributes: query.attributes } : {}),
+    }).toString();
+    return this.signedRequest(
+      'GET', HISTORY_ORDERS_ENDPOINT, queryString, '', credentials,
+      z.array(GateOrderSchema), 'INVALID_HISTORY_ORDERS_RESPONSE', 'normal',
+    );
+  }
+
+  async queryHistoryPositions(credentials: GateCredentials, query: HistoryPositionQuery): Promise<GateHistoricalPosition[]> {
+    const queryString = new URLSearchParams({
+      page: String(query.page), limit: String(query.limit),
+      ...(query.symbol ? { symbol: query.symbol } : {}),
+      ...(query.from !== undefined ? { from: String(query.from) } : {}),
+      to: String(query.to),
+    }).toString();
+    return this.signedRequest(
+      'GET', HISTORY_POSITIONS_ENDPOINT, queryString, '', credentials,
+      z.array(GateHistoricalPositionSchema), 'INVALID_HISTORY_POSITIONS_RESPONSE', 'normal',
     );
   }
 
