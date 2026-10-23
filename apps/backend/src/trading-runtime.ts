@@ -79,8 +79,12 @@ export const CreateStrategyInputSchema = z.object({
     if (value.executionMethod !== 'TAKER_TAKER') context.addIssue({ code: 'custom', path: ['executionMethod'], message: 'close plans execute taker orders' });
     return;
   }
-  // Premium legs trade two different tickers, so both may sit on the same venue.
-  if (value.kind !== 'premium' && value.leftVenue === value.rightVenue) context.addIssue({ code: 'custom', path: ['rightVenue'], message: 'venues must differ' });
+  // A paired position can hold separate long/short legs on one venue in dual mode.
+  // Continuous spread bots still require two venues; premium strategies use two tickers.
+  if (value.kind === 'auto' && value.leftVenue === value.rightVenue) context.addIssue({ code: 'custom', path: ['rightVenue'], message: 'venues must differ' });
+  if (value.kind === 'position' && value.leftVenue === value.rightVenue) {
+    if (!new Decimal(value.leftLeverage).eq(value.rightLeverage)) context.addIssue({ code: 'custom', path: ['rightLeverage'], message: 'same-contract legs must use the same leverage' });
+  }
   if (value.leftSide === value.rightSide) context.addIssue({ code: 'custom', path: ['rightSide'], message: 'legs must have opposing sides' });
   if (value.kind !== 'premium' && !value.entryBps) context.addIssue({ code: 'custom', path: ['entryBps'], message: 'entry threshold is required' });
   if (value.kind === 'auto' && value.entryBps !== undefined && new Decimal(value.entryBps).lte(0)) {
@@ -339,7 +343,8 @@ export class TradingRuntime {
     const requiredByVenue = new Map<string, Decimal>();
     let requiredMargin = new Decimal(0);
     for (const leg of legs) {
-      const existingPosition = positions.find((position) => position.symbol === leg.symbol);
+      const existingPosition = positions.find((position) => position.symbol === leg.symbol
+        && (!leg.positionSide || leg.positionSide === 'NONE' || position.position_side.toUpperCase() === leg.positionSide));
       const existingQuantity = (() => {
         if (!existingPosition) return new Decimal(0);
         const rawQuantity = new Decimal(existingPosition.position_qty);
@@ -796,8 +801,16 @@ export class TradingRuntime {
     const tradingGateway = this.gateway as Partial<TradingCrossExGateway>;
     if (!tradingGateway.createOrder) throw new TradingRuntimeError('live_gateway_unavailable', 503);
     let positionMode: PositionModeResponse['positionMode'] | undefined;
-    if (!metadata) {
+    const strategyRow = metadata ? this.statement("SELECT config_json FROM execution_strategies WHERE id = ? AND environment = 'live'")
+      .get(metadata.strategyId) as { config_json: string } | undefined : undefined;
+    const strategyConfig = strategyRow ? CreateStrategyInputSchema.parse(JSON.parse(strategyRow.config_json)) : undefined;
+    const sameVenueHedge = strategyConfig?.kind === 'position' && !strategyConfig.closePlan
+      && strategyConfig.leftVenue === strategyConfig.rightVenue;
+    if (!metadata || sameVenueHedge) {
       ({ positionMode } = await this.readPositionMode(credentials, input.symbol));
+      if (sameVenueHedge && positionMode !== 'DUAL') {
+        throw new TradingRuntimeError('same_venue_requires_dual_mode', 409);
+      }
       if (input.expectedPositionMode && input.expectedPositionMode !== positionMode) {
         throw new TradingRuntimeError('order_position_mode_changed', 409);
       }
@@ -1179,11 +1192,16 @@ export class TradingRuntime {
     const remote = await tradingGateway.queryOrder(credentials, order.remoteOrderId ?? order.clientOrderId);
     const current = this.getOrder(id);
     if (isTerminalOrderState(current.state) && !isTerminalOrderState(remote.state)) return current;
+    // REST can lag a private fill received during the lookup/cancel. A stale snapshot must not
+    // erase executed quantity, especially before a same-contract maker is hedged after cancel.
+    const quantityRegressed = new Decimal(remote.executed_qty).lt(current.executedQuantity);
+    const executedQuantity = quantityRegressed ? current.executedQuantity : remote.executed_qty;
+    const executedAveragePrice = quantityRegressed ? current.executedAveragePrice : remote.executed_avg_price;
     const updatedAt = Number.isFinite(Number(remote.update_time)) ? new Date(Number(remote.update_time)).toISOString() : new Date().toISOString();
     this.database.prepare(`UPDATE execution_orders SET state = ?, executed_quantity = ?, executed_average_price = ?,
       failure_reason = COALESCE(NULLIF(?, ''), failure_reason), remote_order_id = COALESCE(remote_order_id, ?),
       updated_at = ? WHERE id = ?`)
-      .run(remote.state, remote.executed_qty, remote.executed_avg_price, remote.reason, remote.order_id, updatedAt, id);
+      .run(remote.state, executedQuantity, executedAveragePrice, remote.reason, remote.order_id, updatedAt, id);
     const refreshed = this.getOrder(id);
     this.emit({ type: 'execution.update', payload: refreshed });
     this.notifyOrderListeners(refreshed);
