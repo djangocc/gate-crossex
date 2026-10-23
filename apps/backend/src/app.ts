@@ -119,9 +119,9 @@ const BOROS_STRATEGIES_URL = 'https://api-boros.pendle.finance/apis/v1/strategie
 const BOROS_MARKETS_URL = 'https://api-boros.pendle.finance/apis/v1/markets/by-ids';
 const BOROS_STRATEGIES_CACHE_MS = 30_000;
 
-const CATALOG_VENUES = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER'] as const;
+const CATALOG_VENUES = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER', 'ASTER'] as const;
 const QUOTE_PREFERENCE = ['USDT', 'USDC', 'USD'] as const;
-const CROSSEX_FUTURE_SYMBOL = /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_([A-Z0-9]+)_(USDT|USDC|USD)$/;
+const CROSSEX_FUTURE_SYMBOL = /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_([A-Z0-9]+)_(USDT|USDC|USD)$/;
 const STRATEGY_ID = /^(AUTO|PAIR|PREM|CLOSE)-[A-Z0-9]{8}$/;
 const FundingHistoryRequestSchema = z.object({
   symbols: z.array(z.string().regex(CROSSEX_FUTURE_SYMBOL)).min(1).max(50),
@@ -1448,7 +1448,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       if (request.headers['x-gct-read-intent'] !== 'position-mode') return reply.code(403).send({ error: 'missing_read_intent' });
     },
   }, async (request, reply) => {
-    const parsed = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
+    const parsed = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_position_mode_symbol' });
     reply.header('Cache-Control', 'no-store, max-age=0');
     try {
@@ -1465,7 +1465,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       if (request.headers['x-gct-read-intent'] !== 'leverage') return reply.code(403).send({ error: 'missing_read_intent' });
     },
   }, async (request, reply) => {
-    const parsed = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
+    const parsed = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_leverage_symbol' });
     const tradingGateway = crossExGateway as Partial<TradingCrossExGateway>;
     if (!tradingGateway.queryLeverages) return reply.code(503).send({ error: 'leverage_unavailable' });
@@ -1486,7 +1486,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       if (request.headers['x-gct-trading-intent'] !== 'set-leverage') return reply.code(403).send({ error: 'missing_trading_intent' });
     },
   }, async (request, reply) => {
-    const params = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
+    const params = z.object({ symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/) }).safeParse(request.params);
     const body = z.object({ leverage: z.string().regex(/^(?:[1-9]\d*)(?:\.\d+)?$/).refine((value) => Number(value) <= 200) }).safeParse(request.body);
     if (!params.success || !body.success) return reply.code(400).send({ error: 'invalid_leverage' });
     const tradingGateway = crossExGateway as Partial<TradingCrossExGateway>;
@@ -1668,7 +1668,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     return { logs: tradingRuntime.strategyLogs(parsed.data.id) };
   });
 
-  const MarketWatchSymbolSchema = z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/);
+  const MarketWatchSymbolSchema = z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/);
   const WatchMessageSchema = z.union([
     z.object({
       type: z.literal('watch.quotes'),

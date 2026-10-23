@@ -11,8 +11,8 @@ import type { TradingSession } from './trading-session.js';
 const decimalText = z.string().regex(/^\d+(?:\.\d+)?$/).refine((value) => new Decimal(value).gt(0));
 /** Premium levels may be negative (an ADR trading at a discount), so sign is allowed. */
 const signedDecimalText = z.string().regex(/^-?\d+(?:\.\d+)?$/);
-const venue = z.enum(['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER']);
-const futuresSymbol = z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/);
+const venue = z.enum(['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER', 'ASTER']);
+const futuresSymbol = z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/);
 
 const CreateOrderInputSchema = z.object({
   symbol: futuresSymbol,
@@ -66,7 +66,7 @@ export const CreateStrategyInputSchema = z.object({
     orderCount: z.number().int().min(2).max(100),
     intervalSeconds: z.number().int().min(1).max(86_400),
     targets: z.array(z.object({
-      symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/),
+      symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/),
       side: z.enum(['BUY', 'SELL']),
       quantity: decimalText,
       positionSide: z.enum(['NONE', 'LONG', 'SHORT']),

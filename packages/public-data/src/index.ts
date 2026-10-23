@@ -152,6 +152,8 @@ const HYPERLIQUID_FORCED_REFRESH_MIN_MS = 60_000;
 const HYPERLIQUID_FUNDING_HISTORY_RETRY_DELAYS_MS = [500, 1_500] as const;
 const HYPERLIQUID_FUNDING_HISTORY_PAGE_SPACING_MS = 1_500;
 const LIGHTER_API_URL = 'https://mainnet.zklighter.elliot.ai/api/v1';
+// Only public data uses Aster's native API; all authenticated trading stays on Gate CrossEx.
+const ASTER_PUBLIC_API_URL = 'https://fapi.asterdex.com/fapi/v3';
 const LIGHTER_MARKETS_FRESH_MS = 30 * 60_000;
 const LIGHTER_MARKETS_FORCED_REFRESH_MIN_MS = 60_000;
 /** Lighter caps one funding-history response at this many hourly rows and keeps the newest ones. */
@@ -283,7 +285,7 @@ export interface VenueContractSize {
   multiplier: string;
 }
 
-export const FUNDING_STAT_VENUES = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER'] as const;
+export const FUNDING_STAT_VENUES = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER', 'ASTER'] as const;
 export type FundingStatVenue = typeof FUNDING_STAT_VENUES[number];
 
 /**
@@ -410,7 +412,7 @@ interface ParsedSymbol {
 }
 
 function parseCrossExFutureSymbol(symbol: string): ParsedSymbol {
-  const match = /^(BINANCE|GATE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_(.+)_([A-Z0-9]+)$/.exec(symbol);
+  const match = /^(BINANCE|GATE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_(.+)_([A-Z0-9]+)$/.exec(symbol);
   if (!match?.[1] || !match[2] || !match[3]) throw new PublicMarketDataError('UNSUPPORTED_SYMBOL');
   return { venue: match[1] as ParsedSymbol['venue'], base: match[2], quote: match[3] };
 }
@@ -655,7 +657,8 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
     const boundedLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
     let candles: Candle[];
     switch (symbol.venue) {
-      case 'BINANCE': candles = await this.queryBinanceCandles(symbol, interval, boundedLimit, before); break;
+      case 'BINANCE':
+      case 'ASTER': candles = await this.queryLinearCandles(symbol, interval, boundedLimit, before); break;
       case 'GATE': candles = await this.queryGateCandles(symbol, interval, boundedLimit, before); break;
       case 'OKX': candles = await this.queryOkxCandles(symbol, interval, boundedLimit, before); break;
       case 'BYBIT': candles = await this.queryBybitCandles(symbol, interval, boundedLimit, before); break;
@@ -707,13 +710,14 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
     }));
   }
 
-  private async queryBinanceCandles(symbol: ParsedSymbol, interval: CandleInterval, limit: number, before?: number): Promise<Candle[]> {
-    if (!['USDT', 'USDC'].includes(symbol.quote)) throw new PublicMarketDataError('UNSUPPORTED_SETTLEMENT');
+  private async queryLinearCandles(symbol: ParsedSymbol, interval: CandleInterval, limit: number, before?: number): Promise<Candle[]> {
+    if (!(symbol.venue === 'ASTER' ? ['USDT'] : ['USDT', 'USDC']).includes(symbol.quote)) throw new PublicMarketDataError('UNSUPPORTED_SETTLEMENT');
+    const apiUrl = symbol.venue === 'ASTER' ? ASTER_PUBLIC_API_URL : 'https://fapi.binance.com/fapi/v1';
     const venueSymbol = `${symbol.base}${symbol.quote}`;
     const endQuery = before === undefined ? '' : `&endTime=${before - 1}`;
     const payload = await fetchJson(
       this.fetchImplementation,
-      `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(venueSymbol)}&interval=${interval}&limit=${limit}${endQuery}`,
+      `${apiUrl}/klines?symbol=${encodeURIComponent(venueSymbol)}&interval=${interval}&limit=${limit}${endQuery}`,
       4_000_000,
     );
     return parsePayload(BinanceCandleSchema, payload).map((row) => ({
@@ -916,7 +920,7 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
 
   async queryVenueFundingStats(venue: FundingStatVenue): Promise<VenueFundingStat[]> {
     if (venue === 'GATE') return this.queryGateFundingStats();
-    if (venue === 'BINANCE') return this.queryBinanceFundingStats();
+    if (venue === 'BINANCE' || venue === 'ASTER') return this.queryLinearFundingStats(venue);
     if (venue === 'OKX') return this.queryOkxFundingStats();
     if (venue === 'BYBIT') return this.queryBybitFundingStats();
     if (venue === 'KRAKEN') return this.queryKrakenFundingStats();
@@ -933,7 +937,8 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
     let points: FundingRatePoint[];
     switch (symbol.venue) {
       case 'GATE': points = await this.queryGateFundingHistory(symbol, startTime, endTime, signal); break;
-      case 'BINANCE': points = await this.queryBinanceFundingHistory(symbol, startTime, endTime, signal); break;
+      case 'BINANCE':
+      case 'ASTER': points = await this.queryLinearFundingHistory(symbol, startTime, endTime, signal); break;
       case 'OKX': points = await this.queryOkxFundingHistory(symbol, startTime, signal); break;
       case 'BYBIT': points = await this.queryBybitFundingHistory(symbol, startTime, endTime, signal); break;
       case 'KRAKEN': points = await this.queryKrakenFundingHistory(symbol, startTime, endTime, signal); break;
@@ -963,12 +968,13 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
     });
   }
 
-  private async queryBinanceFundingHistory(symbol: ParsedSymbol, startTime: number, endTime: number, signal?: AbortSignal): Promise<FundingRatePoint[]> {
-    if (!['USDT', 'USDC'].includes(symbol.quote)) throw new PublicMarketDataError('UNSUPPORTED_SETTLEMENT');
+  private async queryLinearFundingHistory(symbol: ParsedSymbol, startTime: number, endTime: number, signal?: AbortSignal): Promise<FundingRatePoint[]> {
+    if (!(symbol.venue === 'ASTER' ? ['USDT'] : ['USDT', 'USDC']).includes(symbol.quote)) throw new PublicMarketDataError('UNSUPPORTED_SETTLEMENT');
+    const apiUrl = symbol.venue === 'ASTER' ? ASTER_PUBLIC_API_URL : 'https://fapi.binance.com/fapi/v1';
     const venueSymbol = `${symbol.base}${symbol.quote}`;
     const payload = await fetchJson(
       this.fetchImplementation,
-      `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${encodeURIComponent(venueSymbol)}&startTime=${Math.floor(startTime)}&endTime=${Math.floor(endTime)}&limit=1000`,
+      `${apiUrl}/fundingRate?symbol=${encodeURIComponent(venueSymbol)}&startTime=${Math.floor(startTime)}&endTime=${Math.floor(endTime)}&limit=1000`,
       1_000_000,
       undefined,
       signal,
@@ -1206,20 +1212,24 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
     return stats;
   }
 
-  private async queryBinanceFundingStats(): Promise<VenueFundingStat[]> {
+  private async queryLinearFundingStats(venue: 'BINANCE' | 'ASTER'): Promise<VenueFundingStat[]> {
+    const apiUrl = venue === 'ASTER' ? ASTER_PUBLIC_API_URL : 'https://fapi.binance.com/fapi/v1';
     const optionalRowsSchema = z.array(z.unknown());
     const [fundingPayload, tickerRows, fundingInfoRows] = await Promise.all([
-      fetchJson(this.fetchImplementation, 'https://fapi.binance.com/fapi/v1/premiumIndex', 4_000_000),
+      fetchJson(this.fetchImplementation, `${apiUrl}/premiumIndex`, 4_000_000),
       optionalPayload(
-        fetchJson(this.fetchImplementation, 'https://fapi.binance.com/fapi/v1/ticker/24hr', 8_000_000),
+        fetchJson(this.fetchImplementation, `${apiUrl}/ticker/24hr`, 8_000_000),
         optionalRowsSchema,
         [],
       ),
-      optionalPayload(
-        fetchJson(this.fetchImplementation, 'https://fapi.binance.com/fapi/v1/fundingInfo', 4_000_000),
-        optionalRowsSchema,
-        [],
-      ),
+      // Aster publishes every interval here. Do not assume Binance's 8h default on a new venue.
+      venue === 'ASTER'
+        ? fetchJson(this.fetchImplementation, `${apiUrl}/fundingInfo`, 4_000_000).then((payload) => parsePayload(optionalRowsSchema, payload))
+        : optionalPayload(
+          fetchJson(this.fetchImplementation, `${apiUrl}/fundingInfo`, 4_000_000),
+          optionalRowsSchema,
+          [],
+        ),
     ]);
     const rows = parsePayload(z.array(z.unknown()), fundingPayload);
     const tickers = new Map<string, z.infer<typeof BinanceTicker24hRowSchema>>();
@@ -1230,7 +1240,10 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
     const fundingIntervals = new Map<string, number>();
     for (const rawRow of fundingInfoRows) {
       const row = BinanceFundingInfoRowSchema.safeParse(rawRow);
-      if (row.success) fundingIntervals.set(row.data.symbol, fundingIntervalHours(row.data.fundingIntervalHours));
+      if (row.success) {
+        const hours = finiteNumber(row.data.fundingIntervalHours);
+        if (hours !== null && hours > 0 && hours <= 24) fundingIntervals.set(row.data.symbol, hours);
+      }
     }
     const stats: VenueFundingStat[] = [];
     for (const rawRow of rows) {
@@ -1240,18 +1253,19 @@ export class VenuePublicMarketDataClient implements PublicMarketDataGateway {
       if (row.data.symbol.includes('_')) continue;
       const quote = row.data.symbol.endsWith('USDT') ? 'USDT' : row.data.symbol.endsWith('USDC') ? 'USDC' : null;
       if (!quote) continue;
+      if (venue === 'ASTER' && (quote !== 'USDT' || !fundingIntervals.has(row.data.symbol))) continue;
       const base = row.data.symbol.slice(0, -quote.length);
       if (!base) continue;
       const rate = finiteNumber(row.data.lastFundingRate);
       const intervalHours = fundingIntervals.get(row.data.symbol) ?? 8;
       const ticker = tickers.get(row.data.symbol);
       stats.push({
-        venue: 'BINANCE', base, quote,
+        venue, base, quote,
         fundingRate: rate === null ? null : String(rate),
         fundingIntervalHours: intervalHours,
         fundingRate8h: rate === null ? null : rateScaledTo8h(rate, intervalHours),
         nextFundingAt: row.data.nextFundingTime > 0 ? new Date(row.data.nextFundingTime).toISOString() : null,
-        // Binance publishes no bulk open-interest endpoint; the per-symbol one is unusable at catalog scale.
+        // Neither feed publishes bulk OI here; CrossEx supplies live OI for watched symbols.
         openInterestValue: null,
         lastPrice: positiveNumberText(ticker?.lastPrice),
         change24h: fractionFromPercent(ticker?.priceChangePercent),

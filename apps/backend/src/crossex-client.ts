@@ -27,7 +27,7 @@ const ADL_ENRICHMENT_BUDGET_MS = 1_500;
 const ADL_ENRICHMENT_REQUEST_TIMEOUT_MS = 1_000;
 const MAX_ADL_ENRICHMENT_SYMBOLS = 20;
 const IsolatedExchangeTypeSchema = z.enum([
-  'BINANCE', 'OKX', 'GATE', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER',
+  'BINANCE', 'OKX', 'GATE', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER', 'ASTER',
 ]);
 
 const GateAccountAssetSchema = z.object({

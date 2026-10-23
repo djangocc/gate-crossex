@@ -11,6 +11,7 @@ const BOROS_VENUES: Record<string, ExchangeLogoId> = {
   hyperliquid: 'hyperliquid',
   deribit: 'deribit',
   lighter: 'lighter',
+  aster: 'aster',
 };
 
 export const DEFAULT_BOROS_TAKER_FEE_RATE = 0.0005;

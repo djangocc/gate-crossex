@@ -754,3 +754,59 @@ describe('bulk venue funding stats', () => {
     }]);
   });
 });
+
+
+describe('Aster public market data', () => {
+  it('backfills the selected Aster candles and funding history without sending credentials', async () => {
+    const now = 1_790_000_000_000;
+    const fetchMock = vi.fn((url: string | URL | Request, init?: RequestInit) => {
+      const parsed = new URL(String(url));
+      expect(parsed.origin).toBe('https://fapi.asterdex.com');
+      expect(new Headers(init?.headers).has('KEY')).toBe(false);
+      expect(new Headers(init?.headers).has('SIGN')).toBe(false);
+      expect(init?.body).toBeUndefined();
+      expect(parsed.searchParams.get('symbol')).toBe('BTCUSDT');
+      if (parsed.pathname.endsWith('/klines')) {
+        expect(parsed.searchParams.get('endTime')).toBe(String(now - 1));
+        return response([[now - 60_000, '10', '12', '9', '11', '3']]);
+      }
+      expect(parsed.pathname).toBe('/fapi/v3/fundingRate');
+      return response([{ fundingTime: now - 1_000, fundingRate: '-0.0001' }]);
+    });
+    const client = new VenuePublicMarketDataClient(fetchMock as typeof fetch, () => now);
+    expect(await client.queryCandles('ASTER_FUTURE_BTC_USDT', '1m', 2, now)).toEqual([
+      { startTime: now - 60_000, open: '10', high: '12', low: '9', close: '11', volume: '3', closed: true },
+    ]);
+    expect(await client.queryFundingHistory('ASTER_FUTURE_BTC_USDT', now - 10_000, now)).toEqual([
+      { timestamp: now - 1_000, rate: '-0.0001' },
+    ]);
+    await expect(client.queryCandles('ASTER_FUTURE_BTC_USDC', '1m', 2)).rejects.toMatchObject({ code: 'UNSUPPORTED_SETTLEMENT' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses Aster settlement intervals rather than assuming 8h or querying another venue', async () => {
+    const fetchMock = vi.fn((url: string | URL | Request) => {
+      expect(new URL(String(url)).origin).toBe('https://fapi.asterdex.com');
+      if (String(url).endsWith('/fundingInfo')) return response([
+        { symbol: 'BTCUSDT', fundingIntervalHours: 4 },
+        { symbol: 'ETHUSDT', fundingIntervalHours: 1 },
+      ]);
+      if (String(url).endsWith('/ticker/24hr')) return response([{ symbol: 'BTCUSDT', lastPrice: '100', priceChangePercent: '2' }]);
+      return response(['BTCUSDT', 'ETHUSDT', 'UNKNOWNUSDT', 'BTCUSDC', 'BTCUSDT_261225'].map((symbol) => ({
+        symbol, lastFundingRate: '0.0001', nextFundingTime: 1_790_001_000_000,
+      })));
+    });
+    const client = new VenuePublicMarketDataClient(fetchMock as typeof fetch);
+    const stats = await client.queryVenueFundingStats('ASTER');
+    expect(stats).toHaveLength(2);
+    expect(stats[0]).toMatchObject({ venue: 'ASTER', base: 'BTC', quote: 'USDT', fundingIntervalHours: 4, fundingRate8h: '0.0002', lastPrice: '100', change24h: '0.02' });
+    expect(stats[1]).toMatchObject({ venue: 'ASTER', base: 'ETH', fundingIntervalHours: 1, fundingRate8h: '0.0008' });
+  });
+
+  it('does not display misleading Aster funding comparisons when interval metadata is unavailable', async () => {
+    const fetchMock = vi.fn((url: string | URL | Request) => String(url).endsWith('/fundingInfo')
+      ? Promise.resolve(new Response('{}', { status: 503 }))
+      : response([{ symbol: 'BTCUSDT', lastFundingRate: '0.0001', nextFundingTime: 1_790_001_000_000 }]));
+    await expect(new VenuePublicMarketDataClient(fetchMock as typeof fetch).queryVenueFundingStats('ASTER')).rejects.toBeInstanceOf(PublicMarketDataError);
+  });
+});

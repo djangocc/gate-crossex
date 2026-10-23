@@ -13,9 +13,13 @@ A local, open-source desktop interface for Gate CrossEx market data and live tra
 
 ## 什么是 CrossEx？ | What is CrossEx?
 
-CrossEx 将 Gate.io、Binance、OKX、Bybit、Kraken、Hyperliquid、Deribit 和 Lighter 接入同一个跨所账户，在这些交易所之间共享保证金和可用资金，减少在每个平台分别预留资金的需要，从而提高资金效率。[注册 CrossEx](https://www.gate.com/zh/crossex)。
+CrossEx 将 Gate.io、Binance、OKX、Bybit、Kraken、Hyperliquid、Deribit、Lighter 和 Aster 接入同一个跨所账户，在这些交易所之间共享保证金和可用资金，减少在每个平台分别预留资金的需要，从而提高资金效率。[注册 CrossEx](https://www.gate.com/zh/crossex)。
 
-CrossEx connects Gate.io, Binance, OKX, Bybit, Kraken, Hyperliquid, Deribit, and Lighter through one cross-exchange account, sharing margin and available capital across these venues. This reduces the need to reserve funds separately on each exchange and improves capital efficiency. [Sign up for CrossEx](https://www.gate.com/crossex).
+CrossEx connects Gate.io, Binance, OKX, Bybit, Kraken, Hyperliquid, Deribit, Lighter, and Aster through one cross-exchange account, sharing margin and available capital across these venues. This reduces the need to reserve funds separately on each exchange and improves capital efficiency. [Sign up for CrossEx](https://www.gate.com/crossex).
+
+Aster 永续通过现有 Gate CrossEx 密钥交易（`ASTER_FUTURE_BTC_USDT`），结算币种 USDT；无需提供 Aster 钱包或私钥。行情目录、实时行情、K 线、资金费率和手动开平仓已接入，实际可交易合约和风险限制以 Gate 接口为准。Aster 独立账户划转入口暂未开放。参见 [Gate 上线公告](https://www.gate.com/announcements/article/102327)。
+
+Aster perpetuals use the existing Gate CrossEx credentials and USDT settlement. Market data, candles, funding and manual orders use the Aster venue; no Aster wallet or private key is needed. Aster-specific fund transfer accounts are not exposed.
 
 ## 主要功能 | What it does
 
