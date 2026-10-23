@@ -2222,6 +2222,7 @@ html[data-theme='light'] .activity-message button { border-color: #cbd6de; color
 /* Keep contract options above both exchange controls in the market panel. */
 .strategy-market-panel > .strategy-panel-head { position: relative; z-index: 40; }
 
+.activity-card .execution-pagination .page-size { color: var(--text); }
 .activity-history-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .activity-history-controls button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--green); background: var(--panel); cursor: pointer; }
 .activity-history-controls button:disabled { opacity: .6; cursor: wait; }
