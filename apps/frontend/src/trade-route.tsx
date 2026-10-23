@@ -332,7 +332,7 @@ export function TradingView({ accountProfileId, asset, catalog, onSelectAsset, m
   const makerFeeRate = numericFutureFeeRate(fees, exchangeId, symbol, 'maker');
   const takerFeeText = takerFeeRate !== undefined ? `${(takerFeeRate * 100).toFixed(4)}%` : t('Exchange setting');
   const makerFeeText = makerFeeRate !== undefined ? `${(makerFeeRate * 100).toFixed(4)}%` : t('Exchange setting');
-  const referenceCandle = chartReady ? hoveredCandle ?? candles[candles.length - 1] ?? null : null;
+  const referenceCandle = chartReady ? candles.find((candle) => candle.startTime === hoveredCandle?.startTime) ?? candles[candles.length - 1] ?? null : null;
   const isFavorite = favorites.includes(symbol);
   const portfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === symbol
     && (positionMode !== 'DUAL' || position.positionSide === positionSide));
@@ -720,7 +720,7 @@ export function TradingView({ accountProfileId, asset, catalog, onSelectAsset, m
             <span className="toolbar-divider" /><span className="live-market"><i /> {t('Live candles')}</span>
             <a className="tv-attribution" href="https://www.tradingview.com/" target="_blank" rel="noreferrer">{t('Charts by TradingView')}</a>
           </div>
-          <div className="ohlc"><span>O&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.open)) : '—'}</span><span>H&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.high)) : '—'}</span><span>L&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.low)) : '—'}</span><span>C&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.close)) : '—'}</span></div>
+          <div className="ohlc" lang="zh-CN"><span>开盘&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.open)) : '—'}</span><span>最高&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.high)) : '—'}</span><span>最低&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.low)) : '—'}</span><span>收盘&nbsp; {referenceCandle ? compactPrice(Number(referenceCandle.close)) : '—'}</span></div>
           <Suspense fallback={<div className="price-chart chart-module-loading" role="status">{t('Loading chart…')}</div>}>
             <CandleChart key={candleKey} candles={candles} interval={interval} seriesKey={candleKey} theme={theme} locale={language === 'zh' ? 'zh-CN' : 'en-US'}
               placeholder={t(!chartReady ? 'Loading chart…' : candleBackfilling[candleKey] ? 'Backfilling venue history…' : 'Collecting live candles…')}

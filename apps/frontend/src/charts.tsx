@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle, TickMarkType, type AreaData, type CandlestickData, type IChartApi, type ISeriesApi, type LogicalRange, type Time, type UTCTimestamp } from 'lightweight-charts';
 import type { Candle, CandleInterval } from './api.js';
 import type { PremiumHistoryPoint } from './premium-history.js';
 import type { PriceDifferenceHistoryPoint } from './price-difference-history.js';
+import { CandleHoverCard } from './candle-hover.js';
 
 type ChartTheme = 'dark' | 'light';
 
@@ -31,6 +32,8 @@ interface CandleChartProps {
 }
 
 export function CandleChart({ candles, interval, seriesKey, theme, locale, placeholder, onHover, onLoadMore }: CandleChartProps) {
+  const tooltipId = useId();
+  const [hover, setHover] = useState<{ time: number; side: 'left' | 'right'; key: string } | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -41,6 +44,8 @@ export function CandleChart({ candles, interval, seriesKey, theme, locale, place
   const shownKeyRef = useRef<string | null>(null);
   const precisionRef = useRef<number | null>(null);
   const renderedRef = useRef<{ key: string; theme: ChartTheme; candles: Candle[] } | null>(null);
+  const seriesKeyRef = useRef(seriesKey);
+  seriesKeyRef.current = seriesKey;
   onHoverRef.current = onHover;
   onLoadMoreRef.current = onLoadMore;
 
@@ -60,7 +65,15 @@ export function CandleChart({ candles, interval, seriesKey, theme, locale, place
     chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     chart.subscribeCrosshairMove((param) => {
       const bar = param.seriesData.get(priceSeries) as CandlestickData<UTCTimestamp> | undefined;
-      onHoverRef.current(bar ? candleByTimeRef.current.get(bar.time) ?? null : null);
+      const point = param.point;
+      const candle = bar && point && point.x >= 0 && point.y >= 0 && point.x < host.clientWidth && point.y < host.clientHeight
+        ? candleByTimeRef.current.get(bar.time) ?? null : null;
+      onHoverRef.current(candle);
+      const side = point && point.x < host.clientWidth / 2 ? 'right' : 'left';
+      setHover((current) => candle
+        ? current?.time === candle.startTime && current.side === side && current.key === seriesKeyRef.current
+          ? current : { time: candle.startTime, side, key: seriesKeyRef.current }
+        : null);
     });
     const handleVisibleRange = (range: LogicalRange | null) => {
       if (!range) return;
@@ -160,11 +173,14 @@ export function CandleChart({ candles, interval, seriesKey, theme, locale, place
   }, [candles, theme, seriesKey]);
 
   const last = candles[candles.length - 1];
+  // Read the selected bar from current props so a forming candle updates without mouse movement.
+  const hovered = hover?.key === seriesKey ? candles.find((candle) => candle.startTime === hover.time) : undefined;
   const summary = last
     ? `${candles.length} ${interval} candles. Latest open ${last.open}, high ${last.high}, low ${last.low}, close ${last.close}.`
     : `No ${interval} candles available.`;
-  return <div className="price-chart">
-    <div className="chart-host" ref={hostRef} role="img" aria-label={summary} />
+  return <div className="price-chart" onMouseLeave={() => { setHover(null); onHoverRef.current(null); }}>
+    <div className="chart-host" ref={hostRef} role="img" aria-label={summary} aria-describedby={hovered ? tooltipId : undefined} />
+    {hovered && hover && <CandleHoverCard id={tooltipId} candle={hovered} side={hover.side} />}
     {candles.length < 2 && <span className="chart-placeholder">{placeholder}</span>}
   </div>;
 }
