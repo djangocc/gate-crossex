@@ -4,6 +4,8 @@ import {
   CandleSeriesResponseSchema,
   CredentialConnectionStatusSchema,
   CrossExPortfolioActivityResponseSchema,
+  CrossExHistoryOrdersResponseSchema,
+  CrossExHistoryPositionsResponseSchema,
   CrossExRiskLimitResponseSchema,
   CrossExTransferBalancesResponseSchema,
   CrossExTransferCoinsResponseSchema,
@@ -41,6 +43,9 @@ import {
   type CrossExAccountBookRecord,
   type CrossExInstrument,
   type CrossExPortfolioActivityResponse,
+  type CrossExHistoryOrdersResponse,
+  type CrossExHistoryPosition,
+  type CrossExHistoryPositionsResponse,
   type CrossExRiskLimitResponse,
   type CrossExTransferBalance,
   type CrossExTransferBalancesResponse,
@@ -97,6 +102,9 @@ export type {
   CrossExAccountBookRecord,
   CrossExInstrument,
   CrossExPortfolioActivityResponse,
+  CrossExHistoryOrdersResponse,
+  CrossExHistoryPosition,
+  CrossExHistoryPositionsResponse,
   CrossExRiskLimitResponse,
   CrossExTransferBalance,
   CrossExTransferBalancesResponse,
@@ -308,11 +316,26 @@ export const api = {
   transferBalances: () => request(CrossExTransferBalancesResponseSchema, '/api/crossex/transfer-balances', {
     headers: { 'x-gct-read-intent': 'transfer-balances' },
   }),
-  portfolioActivity: (coin?: string) => {
-    const params = new URLSearchParams({ limit: '100' });
+  portfolioActivity: (coin?: string, pagination?: { page: number; to: number }) => {
+    const params = new URLSearchParams({ limit: '1000' });
     if (coin) params.set('coin', coin);
+    if (pagination) { params.set('page', String(pagination.page)); params.set('to', String(pagination.to)); }
     return request(CrossExPortfolioActivityResponseSchema, `/api/crossex/portfolio-activity?${params}`, {
       headers: { 'x-gct-read-intent': 'portfolio-activity' },
+    });
+  },
+  historyOrders: (query: { symbol?: string; from?: number; to?: number; attributes?: string; page?: number } = {}) => {
+    const params = new URLSearchParams({ limit: '1000' });
+    for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== '') params.set(key, String(value));
+    return request(CrossExHistoryOrdersResponseSchema, `/api/crossex/history-orders?${params}`, {
+      headers: { 'x-gct-read-intent': 'order-history' },
+    });
+  },
+  historyPositions: (query: { symbol?: string; from?: number; to?: number; page?: number } = {}) => {
+    const params = new URLSearchParams({ limit: '1000' });
+    for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== '') params.set(key, String(value));
+    return request(CrossExHistoryPositionsResponseSchema, `/api/crossex/history-positions?${params}`, {
+      headers: { 'x-gct-read-intent': 'position-history' },
     });
   },
   transferFunds: (body: CrossExTransferRequest) => request(CrossExTransferResponseSchema, '/api/crossex/transfers', {

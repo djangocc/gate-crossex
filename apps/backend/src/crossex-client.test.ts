@@ -13,6 +13,49 @@ describe('Gate APIv4 signing', () => {
     })).toBe('7d6704962cf24815f78524d46ef07834d5fd5359af08ed4ed100273517d1932cd4d233335ce49c1c30abcd12ded2d8e993c0ccd93718cd68a2b0011d66a8bc04');
   });
 
+  it('queries order history with signed GETs, stable paging and settlement filters', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('https://api.gateio.ws/api/v4/crossex/history_orders?page=2&limit=1000&symbol=ASTER_FUTURE_PTB_USDT&from=1000&to=2000&attributes=SETTLEMENT');
+      expect(init?.method).toBe('GET');
+      expect(init?.body).toBeUndefined();
+      expect(new Headers(init?.headers).get('SIGN')).toMatch(/^[a-f0-9]{128}$/);
+      expect(new Headers(init?.headers).get('X-Gate-Channel-Id')).toBeNull();
+      return new Response(JSON.stringify([{
+        order_id: '9007199254740991001', text: '', symbol: 'ASTER_FUTURE_PTB_USDT', state: 'FILLED',
+        side: 'SELL', type: 'MARKET', qty: '123', executed_qty: '123', executed_avg_price: '0.0006073',
+        attribute: 'SETTLEMENT', reason: 'delist', position_side: 'LONG', reduce_only: 'true',
+        create_time: '1500', update_time: '1500',
+      }]));
+    });
+    const client = new GateCrossExClient(fetchMock as typeof fetch, () => 1_700_000_000_000, undefined, 0);
+    const orders = await client.queryHistoryOrders({ apiKey: 'test-key', apiSecret: 'test-secret' }, {
+      page: 2, limit: 1000, symbol: 'ASTER_FUTURE_PTB_USDT', from: 1000, to: 2000, attributes: 'SETTLEMENT',
+    });
+    expect(orders[0]).toMatchObject({ order_id: '9007199254740991001', executed_avg_price: '0.0006073', reason: 'delist' });
+  });
+
+  it('queries historical positions with signed read-only paging and keeps missing fees unknown', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('https://api.gateio.ws/api/v4/crossex/history_positions?page=2&limit=1000&symbol=ASTER_FUTURE_PTB_USDT&from=0&to=2000');
+      expect(init?.method).toBe('GET');
+      expect(init?.body).toBeUndefined();
+      expect(new Headers(init?.headers).get('SIGN')).toMatch(/^[a-f0-9]{128}$/);
+      expect(new Headers(init?.headers).get('X-Gate-Channel-Id')).toBeNull();
+      return new Response(JSON.stringify([{
+        position_id: '9007199254740993001', user_id: 'private-user', symbol: 'ASTER_FUTURE_PTB_USDT',
+        position_side: 'LONG', closed_type: 'COMPLETE_CLOSED', closed_pnl: '-12.345678901234567891',
+        open_avg_price: '0.00124691357891234567891', closed_avg_price: '0.0011234567899', closed_qty: '100000',
+        max_position_qty: '100000', closed_value: '112.34567899', create_time: '1000', update_time: '1500',
+      }]));
+    });
+    const client = new GateCrossExClient(fetchMock as typeof fetch, () => 1_700_000_000_000, undefined, 0);
+    const positions = await client.queryHistoryPositions({ apiKey: 'test-key', apiSecret: 'test-secret' }, {
+      page: 2, limit: 1000, symbol: 'ASTER_FUTURE_PTB_USDT', from: 0, to: 2000,
+    });
+    expect(positions[0]).toMatchObject({ position_id: '9007199254740993001', closed_pnl: '-12.345678901234567891', fee: null, funding_fee: null, liq_fee: null });
+    expect(positions[0]).not.toHaveProperty('user_id');
+  });
+
   it('sends only a signed read-only account request to the documented production endpoint', async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.method).toBe('GET');
@@ -467,6 +510,8 @@ describe('Gate APIv4 signing', () => {
     const fundingFees = await client.queryAccountBook(credentials, {
       coin: 'USDT', limit: 50, statementType: 'FUNDING_FEE',
     });
+    await client.queryAccountBook(credentials, { coin: 'USDT', limit: 100, page: 3, to: 1783689000000 });
+    await client.queryTransfers(credentials, { limit: 100, page: 2, to: 1783689000000 });
 
     expect(coins[0]).toMatchObject({ coin: 'USDT', min_trans_amount: '0.00000001', est_fee: '0', precision: 8 });
     expect(transfer).toEqual({ tx_id: 'tx-1', text: 'portfolio_1' });
@@ -479,6 +524,8 @@ describe('Gate APIv4 signing', () => {
       { url: 'https://api.gateio.ws/api/v4/crossex/transfers?coin=USDT&page=1&limit=50', method: 'GET', body: null, channel: null },
       { url: 'https://api.gateio.ws/api/v4/crossex/account_book?coin=USDT&page=1&limit=50', method: 'GET', body: null, channel: null },
       { url: 'https://api.gateio.ws/api/v4/crossex/account_book?coin=USDT&statement_type=FUNDING_FEE&page=1&limit=50', method: 'GET', body: null, channel: null },
+      { url: 'https://api.gateio.ws/api/v4/crossex/account_book?coin=USDT&page=3&limit=100&to=1783689000000', method: 'GET', body: null, channel: null },
+      { url: 'https://api.gateio.ws/api/v4/crossex/transfers?page=2&limit=100&to=1783689000000', method: 'GET', body: null, channel: null },
     ]);
   });
 });

@@ -34,6 +34,8 @@ import { marginRatePercent } from './portfolio-metrics.js';
 import { PositionsTable } from './positions-table.js';
 import type { PositionTableRow } from './strategy-positions.js';
 import { PositionCloseDialog, type ClosePositionTarget } from './position-close-dialog.js';
+import { OrderHistory } from './order-history.js';
+import { PositionHistory } from './position-history.js';
 
 function VenueFromCode({ code }: { code: string }) {
   const exchange = exchanges.find((item) => item.id === code.toLowerCase());
@@ -67,6 +69,13 @@ interface PortfolioViewProps {
 
 type PortfolioTab = 'positions' | 'orders' | 'fills' | 'margin';
 type ActivityTab = 'transfers' | 'funding-fees' | 'account-book';
+const ACTIVITY_PAGE_SIZE = 1000;
+const activityField = { transfers: 'transfers', 'funding-fees': 'fundingFees', 'account-book': 'accountBook' } as const;
+function mergeActivityRecords<T extends { id: string; createdAt: string }>(existing: T[], incoming: T[]): T[] {
+  return [...new Map([...existing, ...incoming].map((record) => [record.id, record])).values()]
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
 
 function venueDisplayName(code: string): string {
   return exchanges.find((exchange) => exchange.id === code.toLowerCase())?.name ?? code;
@@ -96,11 +105,18 @@ export function PortfolioView({ tradingSnapshot, balances, portfolio, accountStr
   const [tab, setTab] = useState<PortfolioTab>('positions');
   const [tablePages, setTablePages] = useState({ openOrders: 1, tradeHistory: 1, margin: 1 });
   const [refreshing, setRefreshing] = useState(false);
-  const [activityTab, setActivityTab] = useState<ActivityTab>('transfers');
+  const [selectedActivityTab, setActivityTab] = useState<ActivityTab | 'order-history' | 'position-history'>('transfers');
+  const isHistoryTab = selectedActivityTab === 'order-history' || selectedActivityTab === 'position-history';
+  const activityTab: ActivityTab = selectedActivityTab === 'order-history' || selectedActivityTab === 'position-history' ? 'account-book' : selectedActivityTab;
   const [activity, setActivity] = useState<CrossExPortfolioActivityResponse | null>(null);
   const [activityLoading, setActivityLoading] = useState(true);
   const [activityError, setActivityError] = useState<string | null>(null);
   const [activityQuery, setActivityQuery] = useState('');
+  const [olderActivityLoading, setOlderActivityLoading] = useState(false);
+  const [olderActivityError, setOlderActivityError] = useState(false);
+  const activityGeneration = useRef(0);
+  const olderActivityInFlight = useRef(false);
+  const activityTableRef = useRef<HTMLDivElement>(null);
   const [activityPages, setActivityPages] = useState<Record<ActivityTab, number>>({ transfers: 1, 'funding-fees': 1, 'account-book': 1 });
   const [transferCoins, setTransferCoins] = useState<CrossExTransferCoin[]>([]);
   const [transferBalances, setTransferBalances] = useState<CrossExTransferBalance[]>([]);
@@ -320,18 +336,56 @@ export function PortfolioView({ tradingSnapshot, balances, portfolio, accountStr
   }, [snapshot, balances]);
 
   const loadActivity = useCallback(async () => {
+    const generation = ++activityGeneration.current;
     setActivityLoading(true);
     setActivityError(null);
+    setOlderActivityLoading(false);
+    setOlderActivityError(false);
+    olderActivityInFlight.current = false;
     try {
-      setActivity(await api.portfolioActivity());
+      const next = await api.portfolioActivity();
+      if (generation !== activityGeneration.current) return;
+      setActivity(next);
+      setActivityPages({ transfers: 1, 'funding-fees': 1, 'account-book': 1 });
     } catch (error) {
+      if (generation !== activityGeneration.current) return;
       setActivityError(error instanceof ApiError && (error.code === 'credential_not_configured' || error.code === 'credential_missing_from_vault')
         ? 'Credentials required for account activity'
         : 'Portfolio activity is temporarily unavailable');
     } finally {
-      setActivityLoading(false);
+      if (generation === activityGeneration.current) setActivityLoading(false);
     }
   }, []);
+
+
+  async function loadOlderActivity(revealNextPage = false) {
+    if (!activity?.pagination || olderActivityInFlight.current || activityLoading) return;
+    const generation = activityGeneration.current;
+    const { page, to } = activity.pagination;
+    olderActivityInFlight.current = true;
+    setOlderActivityLoading(true);
+    setOlderActivityError(false);
+    try {
+      const next = await api.portfolioActivity(undefined, { page: page + 1, to });
+      if (generation !== activityGeneration.current) return;
+      setActivity((current) => current ? {
+        ...next,
+        transfers: mergeActivityRecords(current.transfers, next.transfers),
+        accountBook: mergeActivityRecords(current.accountBook, next.accountBook),
+        fundingFees: mergeActivityRecords(current.fundingFees, next.fundingFees),
+      } : next);
+      if (revealNextPage) setActivityPages((current) => ({ ...current, [activityTab]: current[activityTab] + 1 }));
+    } catch {
+      if (generation === activityGeneration.current) setOlderActivityError(true);
+    } finally {
+      if (generation === activityGeneration.current) {
+        olderActivityInFlight.current = false;
+        setOlderActivityLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => () => { activityGeneration.current += 1; }, []);
 
   const loadTransferBalances = useCallback(async () => {
     try {
@@ -438,14 +492,26 @@ export function PortfolioView({ tradingSnapshot, balances, portfolio, accountStr
   }), [activity, normalizedActivityQuery]);
   const visibleAccountEntries = activityTab === 'funding-fees' ? visibleFundingFees : visibleAccountBook;
   const activityItemCount = activityTab === 'transfers' ? visibleTransfers.length : visibleAccountEntries.length;
-  const activityPage = executionPageWindow(activityItemCount, activityPages[activityTab]);
+  const activityPage = executionPageWindow(activityItemCount, activityPages[activityTab], ACTIVITY_PAGE_SIZE);
+  useEffect(() => {
+    activityTableRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [activityPage.page, selectedActivityTab, normalizedActivityQuery]);
+  const activityHasMore = activity?.pagination?.hasMore[activityField[activityTab]] ?? false;
+  const activityPagination = <ExecutionPagination
+    itemCount={activityItemCount} page={activityPage.page} pageSize={ACTIVITY_PAGE_SIZE}
+    hasMore={activityHasMore} loading={olderActivityLoading}
+    onPageChange={(page) => {
+      if (page > activityPage.pageCount) void loadOlderActivity(true);
+      else setActivityPages((current) => ({ ...current, [activityTab]: page }));
+    }}
+  />;
 
   useEffect(() => {
     setActivityPages((current) => {
       const next = {
-        transfers: executionPageWindow(visibleTransfers.length, current.transfers).page,
-        'funding-fees': executionPageWindow(visibleFundingFees.length, current['funding-fees']).page,
-        'account-book': executionPageWindow(visibleAccountBook.length, current['account-book']).page,
+        transfers: executionPageWindow(visibleTransfers.length, current.transfers, ACTIVITY_PAGE_SIZE).page,
+        'funding-fees': executionPageWindow(visibleFundingFees.length, current['funding-fees'], ACTIVITY_PAGE_SIZE).page,
+        'account-book': executionPageWindow(visibleAccountBook.length, current['account-book'], ACTIVITY_PAGE_SIZE).page,
       };
       return next.transfers === current.transfers
         && next['funding-fees'] === current['funding-fees']
@@ -631,7 +697,10 @@ export function PortfolioView({ tradingSnapshot, balances, portfolio, accountStr
       try {
         const nextActivity = await api.portfolioActivity();
         if (transferMonitorGeneration.current !== generation) return;
-        setActivity(nextActivity);
+        setActivity((current) => current ? {
+          ...current, fetchedAt: nextActivity.fetchedAt,
+          transfers: mergeActivityRecords(current.transfers, nextActivity.transfers),
+        } : nextActivity);
         const transfer = nextActivity.transfers.find((record) => record.id === transactionId);
         if (!transfer || transfer.status === 'PENDING') continue;
         await Promise.allSettled([onRefresh(), loadTransferBalances()]);
@@ -800,21 +869,25 @@ export function PortfolioView({ tradingSnapshot, balances, portfolio, accountStr
 
       <article className="activity-card terminal-panel">
         <div className="section-title activity-title">
-          <div><p className="eyebrow">{t('Account activity')}</p><h2>{t('Funding history')}</h2></div>
-          <button className="portfolio-refresh" onClick={() => void loadActivity()} disabled={activityLoading}>{activityLoading ? t('Loading…') : t('Refresh')}</button>
+          <div><p className="eyebrow">{t('Account activity')}</p><h2>{t('Account history')}</h2></div>
+          {!isHistoryTab && <button className="portfolio-refresh" onClick={() => void loadActivity()} disabled={activityLoading || olderActivityLoading}>{activityLoading ? t('Loading…') : t('Refresh')}</button>}
         </div>
         <div className="activity-toolbar">
           <div className="activity-tabs">
-            <button className={activityTab === 'transfers' ? 'active' : ''} onClick={() => setActivityTab('transfers')}>{t('Transfers')} ({activity?.transfers.length ?? 0})</button>
-            <button className={activityTab === 'funding-fees' ? 'active' : ''} onClick={() => setActivityTab('funding-fees')}>{t('Funding fees')} ({activity?.fundingFees.length ?? 0})</button>
-            <button className={activityTab === 'account-book' ? 'active' : ''} onClick={() => setActivityTab('account-book')}>{t('Account ledger')} ({activity?.accountBook.length ?? 0})</button>
+            <button className={selectedActivityTab === 'transfers' ? 'active' : ''} onClick={() => setActivityTab('transfers')}>{t('Transfers')} ({activity?.transfers.length ?? 0})</button>
+            <button className={selectedActivityTab === 'funding-fees' ? 'active' : ''} onClick={() => setActivityTab('funding-fees')}>{t('Funding fees')} ({activity?.fundingFees.length ?? 0})</button>
+            <button className={selectedActivityTab === 'account-book' ? 'active' : ''} onClick={() => setActivityTab('account-book')}>{t('Account ledger')} ({activity?.accountBook.length ?? 0})</button>
+            <button className={selectedActivityTab === 'order-history' ? 'active' : ''} onClick={() => setActivityTab('order-history')}>{t('Order history')}</button>
+            <button className={selectedActivityTab === 'position-history' ? 'active' : ''} onClick={() => setActivityTab('position-history')}>{t('Position history')}</button>
           </div>
-          <input value={activityQuery} onChange={(event) => {
+          {!isHistoryTab && <input value={activityQuery} onChange={(event) => {
             setActivityQuery(event.target.value);
             setActivityPages({ transfers: 1, 'funding-fees': 1, 'account-book': 1 });
-          }} placeholder={t('Filter activity')} aria-label={t('Filter activity')} />
+          }} placeholder={t('Filter activity')} aria-label={t('Filter activity')} />}
         </div>
-        <div className="activity-table-wrap">
+        {selectedActivityTab === 'position-history' ? <PositionHistory /> : selectedActivityTab === 'order-history' ? <OrderHistory /> : <>
+        {!activityLoading && !activityError && activityPagination}
+        <div className="activity-table-wrap" ref={activityTableRef}>
           {activityLoading ? <div className="activity-message"><span>◌</span><strong>{t('Loading funding activity…')}</strong></div>
             : activityError ? <div className="activity-message error"><span>!</span><strong>{t(activityError)}</strong><button onClick={() => void loadActivity()}>{t('Try again')}</button></div>
               : activityTab === 'transfers' ? (visibleTransfers.length ? <table className="activity-table">
@@ -845,15 +918,19 @@ export function PortfolioView({ tradingSnapshot, balances, portfolio, accountStr
                   })}</tbody>
                 </table> : <div className="activity-message"><span>◎</span><strong>{t(activityTab === 'funding-fees' ? 'No funding fee history' : 'No account activity')}</strong><small>{t(activityTab === 'funding-fees' ? 'Funding fee entries will appear here.' : 'Balance changes, fees, and funding entries will appear here.')}</small></div>)}
         </div>
-        {!activityLoading && !activityError && activityItemCount > 0 && <ExecutionPagination
-          itemCount={activityItemCount}
-          page={activityPage.page}
-          onPageChange={(page) => setActivityPages((current) => ({ ...current, [activityTab]: page }))}
-        />}
+        {!activityLoading && !activityError && activityPagination}
+        {activityQuery.trim() && <p className="history-search-note">{t('Search applies to loaded entries. Load older entries to search further.')}</p>}
         <footer className="activity-footer">
           <span>{activity ? `${t('Last updated')} ${formatWhen(activity.fetchedAt)}` : t('Authenticated CrossEx REST')}</span>
-          <span>{t('Up to 100 recent entries')}</span>
+          {!activityLoading && !activityError && <span className="activity-history-controls">
+            <span>{t('Loaded entries')}: {activity?.[activityField[activityTab]].length ?? 0}</span>
+            {activity?.pagination?.hasMore[activityField[activityTab]]
+              ? <button type="button" onClick={() => void loadOlderActivity()} disabled={olderActivityLoading}>{t(olderActivityLoading ? 'Loading…' : olderActivityError ? 'Try again' : 'Load 1,000 older entries')}</button>
+              : activity && <span>{t('All available entries loaded')}</span>}
+            {olderActivityError && <span role="status">{t('Could not load older entries. Your loaded history is preserved.')}</span>}
+          </span>}
         </footer>
+        </>}
       </article>
     </section>
 

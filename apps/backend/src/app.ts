@@ -34,6 +34,8 @@ import type {
   CrossExRiskLimit,
   CrossExRiskLimitResponse,
   CrossExPortfolioActivityResponse,
+  CrossExHistoryOrdersResponse,
+  CrossExHistoryPositionsResponse,
   CrossExTransferBalancesResponse,
   CrossExTransferCoinsResponse,
   CrossExTransferRecord,
@@ -468,6 +470,8 @@ function normalizeTransferRecords(records: GateTransferRecord[]): CrossExTransfe
     updatedAt: millisecondTimestamp(record.update_time),
   }));
 }
+
+const PositionHistoryDecimal = Decimal.clone({ precision: 60 });
 
 function normalizeAccountBook(records: GateAccountBookRecord[]): CrossExAccountBookRecord[] {
   return records.map((record) => ({
@@ -2277,7 +2281,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   }, async (request, reply) => {
     const parsed = z.object({
       coin: z.string().trim().regex(/^[A-Z0-9]{1,20}$/).optional(),
-      limit: z.coerce.number().int().min(1).max(200).default(100),
+      limit: z.coerce.number().int().min(1).max(1000).default(1000),
+      page: z.coerce.number().int().min(1).default(1),
+      to: z.coerce.number().int().min(0).default(() => Date.now()),
     }).safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_portfolio_activity_query' });
     const operationsGateway = crossExGateway as Partial<PortfolioOperationsCrossExGateway>;
@@ -2302,10 +2308,105 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         accountBook: normalizeAccountBook(accountBook),
         fundingFees: normalizeAccountBook(fundingFees),
         fetchedAt: new Date().toISOString(),
+        pagination: {
+          page: parsed.data.page, to: parsed.data.to,
+          hasMore: { transfers: transfers.length === parsed.data.limit, accountBook: accountBook.length === parsed.data.limit, fundingFees: fundingFees.length === parsed.data.limit },
+        },
       } satisfies CrossExPortfolioActivityResponse;
     } catch (error) {
       request.log.warn({ reason: error instanceof GateApiError ? error.label : 'LOCAL_CREDENTIAL_ERROR' }, 'portfolio activity query failed');
       return reply.code(502).send({ error: 'portfolio_activity_unavailable' });
+    } finally {
+      credentials = null;
+    }
+  });
+
+  app.get('/api/crossex/history-orders', {
+    preHandler: async (request, reply) => {
+      if (request.headers['x-gct-read-intent'] !== 'order-history') {
+        return reply.code(403).send({ error: 'missing_read_intent' });
+      }
+    },
+  }, async (request, reply) => {
+    const parsed = z.object({
+      symbol: z.string().trim().regex(/^[A-Z0-9_]{3,120}$/).optional(),
+      from: z.coerce.number().int().min(0).optional(),
+      to: z.coerce.number().int().min(0).default(() => Date.now()),
+      attributes: z.enum(['COMMON', 'LIQ', 'REDUCE', 'ADL', 'SETTLEMENT']).optional(),
+      limit: z.coerce.number().int().min(1).max(1000).default(1000),
+      page: z.coerce.number().int().min(1).default(1),
+    }).refine((query) => query.from === undefined || query.from <= query.to).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_order_history_query' });
+    const gateway = crossExGateway as Partial<PortfolioOperationsCrossExGateway>;
+    if (!gateway.queryHistoryOrders) return reply.code(503).send({ error: 'order_history_unavailable' });
+    let credentials: GateCredentials | null = null;
+    try {
+      credentials = await credentialVault.get(DEFAULT_CREDENTIAL_PROFILE);
+      if (!credentials) return reply.code(409).send({ error: 'credential_not_configured' });
+      const orders = await gateway.queryHistoryOrders(credentials, parsed.data);
+      return {
+        items: orders.map((order) => ({
+          id: order.order_id, text: order.text ?? order.client_order_id ?? '',
+          symbol: order.symbol, venue: order.exchange_type || order.symbol.split('_')[0],
+          side: order.side, type: order.type, attribute: order.attribute, positionSide: order.position_side,
+          quantity: order.qty, executedQuantity: order.executed_qty, price: order.price || null,
+          executedAvgPrice: order.executed_avg_price, fee: order.fee, feeCoin: order.fee_coin,
+          reduceOnly: order.reduce_only === 'true', state: order.state, reason: order.reason,
+          createdAt: millisecondTimestamp(order.create_time || order.update_time),
+          updatedAt: millisecondTimestamp(order.update_time),
+        })).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+        fetchedAt: new Date().toISOString(),
+        pagination: { page: parsed.data.page, limit: parsed.data.limit, to: parsed.data.to, hasMore: orders.length === parsed.data.limit },
+      } satisfies CrossExHistoryOrdersResponse;
+    } catch (error) {
+      request.log.warn({ reason: error instanceof GateApiError ? error.label : 'LOCAL_CREDENTIAL_ERROR' }, 'order history query failed');
+      return reply.code(502).send({ error: 'order_history_unavailable' });
+    } finally {
+      credentials = null;
+    }
+  });
+
+  app.get('/api/crossex/history-positions', {
+    preHandler: async (request, reply) => {
+      if (request.headers['x-gct-read-intent'] !== 'position-history') {
+        return reply.code(403).send({ error: 'missing_read_intent' });
+      }
+    },
+  }, async (request, reply) => {
+    const parsed = z.object({
+      symbol: z.string().trim().regex(/^[A-Z0-9_]{3,120}$/).optional(),
+      from: z.coerce.number().int().min(0).optional(),
+      to: z.coerce.number().int().min(0).default(() => Date.now()),
+      page: z.coerce.number().int().min(1).default(1),
+      limit: z.coerce.number().int().min(1).max(1000).default(1000),
+    }).refine((query) => query.from === undefined || query.from <= query.to).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_position_history_query' });
+    const gateway = crossExGateway as Partial<PortfolioOperationsCrossExGateway>;
+    if (!gateway.queryHistoryPositions) return reply.code(503).send({ error: 'position_history_unavailable' });
+    let credentials: GateCredentials | null = null;
+    try {
+      credentials = await credentialVault.get(DEFAULT_CREDENTIAL_PROFILE);
+      if (!credentials) return reply.code(409).send({ error: 'credential_not_configured' });
+      const positions = await gateway.queryHistoryPositions(credentials, parsed.data);
+      return {
+        items: positions.map((position) => ({
+          id: position.position_id, symbol: position.symbol, venue: position.symbol.split('_')[0],
+          positionSide: position.position_side, closedType: position.closed_type,
+          openAvgPrice: position.open_avg_price, closedAvgPrice: position.closed_avg_price,
+          closedQuantity: position.closed_qty, maxQuantity: position.max_position_qty, closedValue: position.closed_value,
+          realizedPnl: position.closed_pnl, fee: position.fee, liquidationFee: position.liq_fee, fundingFee: position.funding_fee,
+          netPnl: position.fee !== null && position.liq_fee !== null && position.funding_fee !== null
+            ? new PositionHistoryDecimal(position.closed_pnl).minus(position.fee).minus(position.liq_fee).plus(position.funding_fee).toFixed()
+            : null,
+          settlementCoin: position.symbol.split('_').at(-1) ?? '',
+          createdAt: millisecondTimestamp(position.create_time), updatedAt: millisecondTimestamp(position.update_time),
+        })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+        fetchedAt: new Date().toISOString(),
+        pagination: { page: parsed.data.page, limit: parsed.data.limit, to: parsed.data.to, hasMore: positions.length === parsed.data.limit },
+      } satisfies CrossExHistoryPositionsResponse;
+    } catch (error) {
+      request.log.warn({ reason: error instanceof GateApiError ? error.label : 'LOCAL_CREDENTIAL_ERROR' }, 'position history query failed');
+      return reply.code(502).send({ error: 'position_history_unavailable' });
     } finally {
       credentials = null;
     }

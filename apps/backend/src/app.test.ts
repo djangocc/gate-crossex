@@ -12,7 +12,7 @@ import type { Candle, CandleInterval } from '@gate-crossex/shared-types';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { DEFAULT_CREDENTIAL_PROFILE, EnvFileCredentialVault, MemoryCredentialVault, type CredentialVault, type GateCredentials } from './credential-vault.js';
-import { GateApiError, type CrossExOrderRequest, type GateCrossExAccount, type GateCrossExOrder, type GateCrossExPortfolio, type GateCrossExRiskLimit, type GateCrossExSymbol, type GateFeeRate, type GateOrderActionResponse, type GateSpotAccount, type GateTransferCoin, type GateTransferRecord, type GateAccountBookRecord, type GateTransferResponse, type TradingCrossExGateway } from './crossex-client.js';
+import { GateApiError, type CrossExOrderRequest, type GateCrossExAccount, type GateCrossExOrder, type GateCrossExPortfolio, type GateHistoricalPosition, type HistoryPositionQuery, type GateCrossExRiskLimit, type GateCrossExSymbol, type GateFeeRate, type GateOrderActionResponse, type GateSpotAccount, type GateTransferCoin, type GateTransferRecord, type GateAccountBookRecord, type GateTransferResponse, type TradingCrossExGateway } from './crossex-client.js';
 import { openDatabase } from './database.js';
 import { CrossExMarketHub } from './market-hub.js';
 import { TradingSession } from './trading-session.js';
@@ -70,6 +70,14 @@ const portfolioFixture: GateCrossExPortfolio = {
   }],
 };
 
+const historyPositionFixture: GateHistoricalPosition = {
+  position_id: '9007199254740993001', symbol: 'ASTER_FUTURE_PTB_USDT', position_side: 'LONG', closed_type: 'COMPLETE_CLOSED',
+  open_avg_price: '0.00124691357891234567891', closed_avg_price: '0.0011234567899',
+  closed_qty: '100000', max_position_qty: '100000', closed_value: '112.34567899',
+  closed_pnl: '-12.345678901234567891', fee: '0.45678901', liq_fee: '0', funding_fee: '0',
+  create_time: '1893452400000', update_time: '1893456000000',
+};
+
 class FakeCrossExGateway implements TradingCrossExGateway {
   readonly receivedCredentials: GateCredentials[] = [];
   readonly createdOrders: CrossExOrderRequest[] = [];
@@ -77,7 +85,7 @@ class FakeCrossExGateway implements TradingCrossExGateway {
   readonly cancelledOrders: string[] = [];
   readonly leverageUpdates: Array<{ symbol: string; leverage: string }> = [];
   readonly createdTransfers: CrossExTransferRequest[] = [];
-  readonly accountBookQueries: Array<{ coin?: string; limit: number; statementType?: string }> = [];
+  readonly accountBookQueries: Array<{ coin?: string; limit: number; statementType?: string; page?: number; to?: number }> = [];
   symbolQueryCount = 0;
   riskQueryCount = 0;
   feeQueryCount = 0;
@@ -261,9 +269,25 @@ class FakeCrossExGateway implements TradingCrossExGateway {
     }];
   }
 
+  readonly historyPositionQueries: HistoryPositionQuery[] = [];
+  async queryHistoryPositions(credentials: GateCredentials, query: HistoryPositionQuery): Promise<GateHistoricalPosition[]> {
+    this.receivedCredentials.push({ ...credentials });
+    this.historyPositionQueries.push({ ...query });
+    return [{ ...historyPositionFixture }];
+  }
+
+  readonly historyOrderQueries: Array<{ symbol?: string; from?: number; to: number; attributes?: string; page: number; limit: number }> = [];
+  async queryHistoryOrders(credentials: GateCredentials, query: { symbol?: string; from?: number; to: number; attributes?: string; page: number; limit: number }): Promise<GateCrossExOrder[]> {
+    this.receivedCredentials.push({ ...credentials });
+    this.historyOrderQueries.push({ ...query });
+    return [{ ...portfolioFixture.openOrders[0], order_id: '9007199254740991001', state: 'FILLED',
+      symbol: 'ASTER_FUTURE_PTB_USDT', exchange_type: 'ASTER', attribute: 'SETTLEMENT', reason: 'delist',
+      position_side: 'LONG', side: 'SELL', reduce_only: 'true', executed_qty: '123', executed_avg_price: '0.0006073' }];
+  }
+
   async queryAccountBook(
     credentials: GateCredentials,
-    query: { coin?: string; limit: number; statementType?: string },
+    query: { coin?: string; limit: number; statementType?: string; page?: number; to?: number },
   ): Promise<GateAccountBookRecord[]> {
     this.receivedCredentials.push({ ...credentials });
     this.accountBookQueries.push({ ...query });
@@ -1396,9 +1420,135 @@ describe('local backend', () => {
     });
     expect(gateway.receivedCredentials).toHaveLength(3);
     expect(gateway.accountBookQueries).toEqual([
-      { coin: 'USDT', limit: 50 },
-      { coin: 'USDT', limit: 50, statementType: 'FUNDING_FEE' },
+      expect.objectContaining({ coin: 'USDT', limit: 50, page: 1, to: expect.any(Number) }),
+      expect.objectContaining({ coin: 'USDT', limit: 50, statementType: 'FUNDING_FEE', page: 1, to: expect.any(Number) }),
     ]);
+  });
+
+  it('reads historical settlement orders with 1000-row paging, filters and no live-mode requirement', async () => {
+    const { app, gateway, tradingSession } = await createTestApp({ liveTradingEnabled: true });
+    tradingSession.set('readonly');
+    const headers = { host: '127.0.0.1:17840', 'x-gct-read-intent': 'order-history' };
+    const missingIntent = await app.inject({ method: 'GET', url: '/api/crossex/history-orders', headers: { host: headers.host } });
+    expect(missingIntent.statusCode).toBe(403);
+    expect(gateway.historyOrderQueries).toHaveLength(0);
+    const first = await app.inject({ method: 'GET', url: '/api/crossex/history-orders', headers });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      items: [{ id: '9007199254740991001', venue: 'ASTER', symbol: 'ASTER_FUTURE_PTB_USDT',
+        attribute: 'SETTLEMENT', reason: 'delist', executedQuantity: '123', executedAvgPrice: '0.0006073', reduceOnly: true }],
+      pagination: { page: 1, limit: 1000, hasMore: false },
+    });
+    const cutoff = first.json().pagination.to;
+    const next = await app.inject({ method: 'GET', url: `/api/crossex/history-orders?symbol=ASTER_FUTURE_PTB_USDT&from=1000&to=${cutoff}&attributes=SETTLEMENT&page=2`, headers });
+    expect(next.statusCode).toBe(200);
+    expect(gateway.historyOrderQueries).toEqual([
+      { page: 1, limit: 1000, to: cutoff },
+      { page: 2, limit: 1000, to: cutoff, symbol: 'ASTER_FUTURE_PTB_USDT', from: 1000, attributes: 'SETTLEMENT' },
+    ]);
+    const full = first.json().items[0];
+    gateway.queryHistoryOrders = async () => Array.from({ length: 1000 }, (_, index) => ({
+      ...portfolioFixture.openOrders[0], order_id: `${index}`, state: index === 0 ? 'CANCELLED' : 'FILLED', executed_qty: '1',
+    }));
+    const batch = await app.inject({ method: 'GET', url: '/api/crossex/history-orders', headers });
+    expect(batch.json().items).toHaveLength(1000);
+    expect(batch.json().pagination.hasMore).toBe(true);
+    expect(batch.json().items[0]).toMatchObject({ state: 'CANCELLED', executedQuantity: '1' });
+    expect(full).not.toHaveProperty('user_id');
+    for (const query of ['page=0', 'page=1.5', 'limit=1001', 'from=2&to=1', 'symbol=../private', 'attributes=INVALID']) {
+      expect((await app.inject({ method: 'GET', url: `/api/crossex/history-orders?${query}`, headers })).statusCode).toBe(400);
+    }
+  });
+
+  it('reads cumulative position history with exact net PnL, signed fees, and stable 1000-row paging', async () => {
+    const { app, gateway, tradingSession } = await createTestApp({ liveTradingEnabled: true });
+    tradingSession.set('readonly');
+    const headers = { host: '127.0.0.1:17840', 'x-gct-read-intent': 'position-history' };
+    expect((await app.inject({ method: 'GET', url: '/api/crossex/history-positions', headers: { host: headers.host } })).statusCode).toBe(403);
+    expect(gateway.historyPositionQueries).toHaveLength(0);
+    const first = await app.inject({ method: 'GET', url: '/api/crossex/history-positions', headers });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ items: [{
+      id: '9007199254740993001', symbol: 'ASTER_FUTURE_PTB_USDT', venue: 'ASTER', positionSide: 'LONG',
+      closedType: 'COMPLETE_CLOSED', openAvgPrice: '0.00124691357891234567891', closedAvgPrice: '0.0011234567899',
+      closedQuantity: '100000', realizedPnl: '-12.345678901234567891', netPnl: '-12.802467911234567891', settlementCoin: 'USDT',
+    }], pagination: { page: 1, limit: 1000, hasMore: false } });
+    const cutoff = first.json().pagination.to;
+    const next = await app.inject({ method: 'GET', url: `/api/crossex/history-positions?symbol=ASTER_FUTURE_PTB_USDT&from=1000&to=${cutoff}&page=2`, headers });
+    expect(next.statusCode).toBe(200);
+    expect(gateway.historyPositionQueries).toEqual([
+      { page: 1, limit: 1000, to: cutoff }, { page: 2, limit: 1000, to: cutoff, from: 1000, symbol: 'ASTER_FUTURE_PTB_USDT' },
+    ]);
+    gateway.queryHistoryPositions = async () => [
+      { ...historyPositionFixture, position_id: 'funding-paid', funding_fee: '-0.1', liq_fee: '0.01' },
+      { ...historyPositionFixture, position_id: 'funding-earned', funding_fee: '1' },
+      { ...historyPositionFixture, position_id: 'fee-unknown', fee: null },
+      { ...historyPositionFixture, position_id: 'partial', closed_type: 'PARTIAL_CLOSED' },
+    ];
+    const amounts = (await app.inject({ method: 'GET', url: '/api/crossex/history-positions', headers })).json().items;
+    expect(amounts.map((x: { netPnl: string | null }) => x.netPnl)).toEqual([
+      '-12.912467911234567891', '-11.802467911234567891', null, '-12.802467911234567891',
+    ]);
+    expect(amounts[3].closedType).toBe('PARTIAL_CLOSED');
+    expect(first.json().items[0]).not.toHaveProperty('user_id');
+    gateway.queryHistoryPositions = async () => Array.from({ length: 1000 }, (_, index) => ({ ...historyPositionFixture, position_id: `${index}` }));
+    expect((await app.inject({ method: 'GET', url: '/api/crossex/history-positions', headers })).json().pagination.hasMore).toBe(true);
+    for (const query of ['page=0', 'page=1.5', 'limit=1001', 'from=2&to=1', 'symbol=../private']) {
+      expect((await app.inject({ method: 'GET', url: `/api/crossex/history-positions?${query}`, headers })).statusCode).toBe(400);
+    }
+  });
+
+  it('requires credentials for position history and does not expose upstream errors', async () => {
+    const headers = { host: '127.0.0.1:17840', 'x-gct-read-intent': 'position-history' };
+    const empty = await createTestApp();
+    expect((await empty.app.inject({ method: 'GET', url: '/api/crossex/history-positions', headers })).statusCode).toBe(409);
+    expect(empty.gateway.historyPositionQueries).toHaveLength(0);
+    const { app, gateway } = await createTestApp({ liveTradingEnabled: true });
+    gateway.queryHistoryPositions = async () => { throw new Error('private-upstream-payload'); };
+    const response = await app.inject({ method: 'GET', url: '/api/crossex/history-positions', headers });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: 'position_history_unavailable' });
+  });
+
+  it('requires credentials for order history and sanitizes upstream failures', async () => {
+    const headers = { host: '127.0.0.1:17840', 'x-gct-read-intent': 'order-history' };
+    const empty = await createTestApp();
+    expect((await empty.app.inject({ method: 'GET', url: '/api/crossex/history-orders', headers })).statusCode).toBe(409);
+    expect(empty.gateway.historyOrderQueries).toHaveLength(0);
+    const { app, gateway } = await createTestApp({ liveTradingEnabled: true });
+    gateway.queryHistoryOrders = async () => { throw new Error('private-upstream-payload'); };
+    const response = await app.inject({ method: 'GET', url: '/api/crossex/history-orders', headers });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: 'order_history_unavailable' });
+  });
+
+  it('pages account activity beyond the first batch using the same history cutoff', async () => {
+    const { app, gateway } = await createTestApp({ liveTradingEnabled: true });
+    const headers = { host: '127.0.0.1:17840', 'x-gct-read-intent': 'portfolio-activity' };
+    const original = gateway.queryAccountBook.bind(gateway);
+    gateway.queryAccountBook = async (credentials, query) => {
+      if (query.page === 1) return original(credentials, query);
+      gateway.accountBookQueries.push({ ...query });
+      return [];
+    };
+    const first = await app.inject({ method: 'GET', url: '/api/crossex/portfolio-activity?limit=1', headers });
+    const defaults = await app.inject({ method: 'GET', url: '/api/crossex/portfolio-activity', headers });
+    expect(defaults.statusCode).toBe(200);
+    expect(gateway.accountBookQueries.at(-1)?.limit).toBe(1000);
+    const cutoff = first.json().pagination.to as number;
+    expect(first.json().pagination).toMatchObject({ page: 1, hasMore: { accountBook: true, fundingFees: true } });
+    const next = await app.inject({ method: 'GET', url: `/api/crossex/portfolio-activity?limit=1&page=2&to=${cutoff}`, headers });
+    expect(next.statusCode).toBe(200);
+    expect(next.json()).toMatchObject({ accountBook: [], pagination: { page: 2, to: cutoff, hasMore: { accountBook: false, fundingFees: false } } });
+    expect(gateway.accountBookQueries.slice(-2)).toEqual([
+      { limit: 1, page: 2, to: cutoff },
+      { limit: 1, page: 2, to: cutoff, statementType: 'FUNDING_FEE' },
+    ]);
+    const deep = await app.inject({ method: 'GET', url: `/api/crossex/portfolio-activity?page=1001&to=${cutoff}`, headers });
+    expect(deep.statusCode).toBe(200);
+    for (const query of ['page=0', 'page=1.5', 'to=-1']) {
+      expect((await app.inject({ method: 'GET', url: `/api/crossex/portfolio-activity?${query}`, headers })).statusCode).toBe(400);
+    }
   });
 
   it('keeps fund transfers locked behind live mode and records successful submissions', async () => {
