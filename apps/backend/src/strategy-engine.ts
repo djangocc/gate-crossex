@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { Decimal } from 'decimal.js';
+import { manualOrderPositionSide } from '@gate-crossex/shared-types';
 import type { LiveMarket } from './market-hub.js';
 import type { TradingSession } from './trading-session.js';
 import { GateApiError } from './crossex-client.js';
@@ -64,6 +65,8 @@ interface StrategyActor {
   busy: boolean;
   queue: Promise<void>;
   quotes: Map<QuoteIntent, MakerQuote>;
+  /** Keep quoting blocked until a same-contract maker cancellation is proved terminal. */
+  sameVenueCancelPending: boolean;
   repairAttempts: number;
   lastRepairAt: number;
   failureCount: number;
@@ -115,6 +118,11 @@ function legsOf(config: CreateStrategyInput): { left: LegDefinition; right: LegD
     left: { leg: 'left', venue: config.leftVenue, side: config.leftSide, symbol: symbolFor(config.leftVenue, config.asset) },
     right: { leg: 'right', venue: config.rightVenue, side: config.rightSide, symbol: symbolFor(config.rightVenue, rightAsset) },
   };
+}
+
+function sameVenueMaker(config: CreateStrategyInput): boolean {
+  return config.kind === 'position' && !config.closePlan
+    && config.leftVenue === config.rightVenue && config.executionMethod === 'MAKER_TAKER';
 }
 
 /**
@@ -683,7 +691,7 @@ export class StrategyEngine {
     this.invalidateLedger(record.id);
     const actor: StrategyActor = {
       id: record.id, config: record.config, kind: record.kind, status: record.status,
-      busy: false, queue: Promise.resolve(), quotes: new Map(), repairAttempts: 0,
+      busy: false, queue: Promise.resolve(), quotes: new Map(), sameVenueCancelPending: false, repairAttempts: 0,
       lastRepairAt: 0, failureCount: 0, cooldownUntil: 0, lastQuoteAt: 0,
       suspended, quiesceTarget: null, quiesceReason: null, unresolvedOrders: [], createdAt: Date.parse(record.createdAt),
       lastCloseAt: Date.parse(record.updatedAt),
@@ -712,6 +720,11 @@ export class StrategyEngine {
     config: CreateStrategyInput,
     legs: { left: LegDefinition; right: LegDefinition },
   ): Promise<{ requiredMargin: string; availableMargin: string }> {
+    const sameVenueHedge = config.kind === 'position' && legs.left.symbol === legs.right.symbol;
+    if (sameVenueHedge) {
+      const mode = await this.runtime.queryPositionMode(legs.left.symbol);
+      if (mode.positionMode !== 'DUAL') throw new StrategyEngineError('same_venue_requires_dual_mode', 409);
+    }
     const pair = this.freshMarketPair(legs.left.symbol, legs.right.symbol);
     if (!pair) throw new StrategyEngineError('strategy_market_data_unavailable', 409);
     const { left: leftMarket, right: rightMarket } = pair;
@@ -734,6 +747,7 @@ export class StrategyEngine {
         symbol: legs.left.symbol,
         venue: legs.left.venue,
         side: legs.left.side,
+        ...(sameVenueHedge ? { positionSide: manualOrderPositionSide('DUAL', legs.left.side, config.reduceOnly) } : {}),
         leverage: config.leftLeverage,
         estimatedQuantity: target.toString(),
         estimatedPrice: leftPrice.toString(),
@@ -742,6 +756,7 @@ export class StrategyEngine {
         symbol: legs.right.symbol,
         venue: legs.right.venue,
         side: legs.right.side,
+        ...(sameVenueHedge ? { positionSide: manualOrderPositionSide('DUAL', legs.right.side, config.reduceOnly) } : {}),
         leverage: config.rightLeverage,
         estimatedQuantity: rightQuantity.toString(),
         estimatedPrice: rightPrice.toString(),
@@ -1702,6 +1717,9 @@ export class StrategyEngine {
   }
 
   private async evaluateMakerQuotes(actor: StrategyActor): Promise<void> {
+    // A pending cancel or hedge must settle before another same-contract maker can rest.
+    if (sameVenueMaker(actor.config) && (actor.sameVenueCancelPending
+      || this.openStrategyOrders(actor.id, new Set([...actor.quotes.values()].map((quote) => quote.orderId))).length > 0)) return;
     const exposure = this.legExposures(actor.id, actor.config);
     const matched = this.matchedQuantity(exposure);
     const perOrder = new Decimal(actor.config.perOrderQuantity);
@@ -1741,6 +1759,12 @@ export class StrategyEngine {
       const tolerance = tick ? new Decimal(tick) : existing.price.mul('0.0001');
       const drifted = desired.price.minus(existing.price).abs().gte(tolerance);
       if (!drifted || now - existing.quotedAt < this.options.requoteIntervalMs) return;
+      if (sameVenueMaker(actor.config)) {
+        // A requote can itself race a fill. End this pass after cancellation so the queued fill
+        // reconciliation hedges the final quantity before sizing any replacement maker.
+        await this.settleSameVenueQuotes(actor);
+        return;
+      }
       existing.cancelling = true;
       try {
         await this.runtime.cancelOrder(existing.orderId);
@@ -2021,8 +2045,42 @@ export class StrategyEngine {
     return complete;
   }
 
+  private async settleSameVenueQuotes(actor: StrategyActor): Promise<boolean> {
+    if (this.options.now() < actor.cooldownUntil) return false;
+    // Cross-venue makers can remain open during hedging. On the same book, first prove the
+    // resting quote gone so the opposing taker cannot hit it. Reuse remote reconciliation to
+    // include fills racing the cancel and to retain ambiguous submissions as unresolved.
+    actor.busy = true;
+    actor.sameVenueCancelPending = true;
+    try {
+      const result = await this.runtime.quiesceOpenOrders({ strategyId: actor.id, timeoutMs: this.options.orderTimeoutMs });
+      if (result.unresolved.length > 0) {
+        actor.cooldownUntil = this.options.now() + Math.max(1_000, this.options.repairCooldownMs);
+        this.runtime.addStrategyLog(actor.id, 'warning', 'Same-venue hedge waiting for cancellation',
+          'Maker cancellation must be confirmed before hedging', '—', 'No taker or replacement maker submitted');
+        return false;
+      }
+      actor.quotes.clear();
+      actor.sameVenueCancelPending = false;
+      return true;
+    } catch (error) {
+      actor.cooldownUntil = this.options.now() + Math.max(1_000, this.options.repairCooldownMs);
+      this.runtime.addStrategyLog(actor.id, 'warning', 'Same-venue maker cancellation failed',
+        'Hedge deferred until cancellation is confirmed', '—', error instanceof Error ? error.message.slice(0, 120) : 'cancel error');
+      return false;
+    } finally {
+      actor.busy = false;
+    }
+  }
+
   private async ensureHedged(actor: StrategyActor, exposure: { left: Decimal; right: Decimal }): Promise<void> {
     if (actor.busy || (actor.status !== 'RUNNING' && !actor.suspended)) return;
+    if (sameVenueMaker(actor.config) && (actor.sameVenueCancelPending
+      || (this.openStrategyOrders(actor.id, new Set()).some((order) => order.type === 'LIMIT')
+        && exposure.left.plus(exposure.right).abs().gt(QUANTITY_EPSILON)))) {
+      if (!(await this.settleSameVenueQuotes(actor))) return;
+      exposure = this.legExposures(actor.id, actor.config);
+    }
     // One repair target per pass: for equal-notional the oldest broken clip (each clip has its
     // own intended ratio), otherwise the global fixed-ratio imbalance. `k` is always the
     // right-shares-per-ADR-unit conversion used to size a right-leg repair order.

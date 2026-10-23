@@ -25,14 +25,22 @@ class ScriptedGateway implements TradingCrossExGateway {
   availableMargin = '1000000';
   accountAssets: GateCrossExAccount['assets'] = [];
   accountMode: 'CROSS_EXCHANGE' | 'ISOLATED_EXCHANGE' = 'CROSS_EXCHANGE';
+  positionMode: 'SINGLE' | 'DUAL' = 'SINGLE';
   isolatedAvailableMargins: Record<string, string> = {};
   holdCancellations = false;
+  beforeCancel?: (orderId: string) => void;
+  private readonly remoteFills = new Map<string, string>();
   private readonly failCreateBudget = new Map<string, number>();
   private readonly remoteStates = new Map<string, string>();
   private sequence = 0;
 
   failCreate(symbol: string, times: number): void {
     this.failCreateBudget.set(symbol, (this.failCreateBudget.get(symbol) ?? 0) + times);
+  }
+
+  setRemoteFill(orderId: string, quantity: string, state = 'PARTIALLY_FILLED'): void {
+    this.remoteFills.set(orderId, quantity);
+    this.remoteStates.set(orderId, state);
   }
 
   async queryAccount(_credentials: GateCredentials, exchangeType?: string): Promise<GateCrossExAccount> {
@@ -47,7 +55,7 @@ class ScriptedGateway implements TradingCrossExGateway {
     return {
       available_margin: availableMargin, margin_balance: availableMargin, initial_margin: '0',
       maintenance_margin: '0', initial_margin_rate: '0', maintenance_margin_rate: '0',
-      position_mode: 'SINGLE', account_mode: this.accountMode, exchange_type: normalizedExchange,
+      position_mode: this.positionMode, account_mode: this.accountMode, exchange_type: normalizedExchange,
       update_time: String(Date.now()), assets: this.accountAssets,
     };
   }
@@ -93,7 +101,7 @@ class ScriptedGateway implements TradingCrossExGateway {
       price: created.price ?? '0',
       time_in_force: created.time_in_force,
       state,
-      executed_qty: '0',
+      executed_qty: this.remoteFills.get(orderId) ?? '0',
       executed_amount: '0',
       executed_avg_price: '0',
       fee_coin: 'USDT',
@@ -125,6 +133,7 @@ class ScriptedGateway implements TradingCrossExGateway {
   }
 
   async cancelOrder(_credentials: GateCredentials, orderId: string): Promise<GateOrderActionResponse> {
+    this.beforeCancel?.(orderId);
     this.cancelledOrders.push(orderId);
     if (!this.holdCancellations) this.remoteStates.set(orderId, 'CANCELLED');
     return { order_id: orderId, text: '' };
@@ -1810,5 +1819,180 @@ describe('strategy engine', () => {
     expect(runtime.strategyLogs(record.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'Strategy paused', condition: 'Account credentials changed' }),
     ]));
+  });
+});
+
+
+describe('same-venue paired positions', () => {
+  const symbol = 'BINANCE_FUTURE_BTC_USDT';
+  const config = { ...takerTakerConfig, rightVenue: 'BINANCE', entryBps: '-10', totalAmount: '0.1' };
+
+  it('requires dual mode before any leverage update or order', async () => {
+    const { engine, gateway, markets, runtime } = await createHarness();
+    markets.set(symbol, '100000', '100001');
+    await expect(engine.startStrategy(config)).rejects.toMatchObject({ code: 'same_venue_requires_dual_mode' });
+    expect(gateway.createdOrders).toHaveLength(0);
+    expect(gateway.leverageUpdates).toHaveLength(0);
+    expect(runtime.listStrategies()).toHaveLength(0);
+  });
+
+  it('opens independent short and long legs on the same contract', async () => {
+    const { engine, gateway, markets, runtime } = await createHarness();
+    gateway.positionMode = 'DUAL';
+    markets.set(symbol, '100000', '100001');
+    const record = await engine.startStrategy(config);
+    expect(record.status).toBe('RUNNING');
+    const tick = engine.tick();
+    await waitFor(() => gateway.createdOrders.length === 2);
+    expect(gateway.createdOrders).toEqual([
+      expect.objectContaining({ symbol, side: 'SELL', position_side: 'SHORT', reduce_only: 'false' }),
+      expect.objectContaining({ symbol, side: 'BUY', position_side: 'LONG', reduce_only: 'false' }),
+    ]);
+    ackOrder(runtime, 'remote-1', 'FILLED', '0.1', '100000');
+    ackOrder(runtime, 'remote-2', 'FILLED', '0.1', '100001');
+    await tick;
+  });
+
+  it('closes the matching long and short legs and rejects an oversized close', async () => {
+    const { engine, gateway, markets, runtime } = await createHarness();
+    gateway.positionMode = 'DUAL';
+    markets.set(symbol, '100000', '100001');
+    gateway.positions = [futuresPosition(symbol, 'SHORT', '0.3'), futuresPosition(symbol, 'LONG', '0.1')];
+    await expect(engine.startStrategy({ ...config, totalAmount: '0.2', reduceOnly: true }))
+      .rejects.toMatchObject({ code: 'reduce_only_position_unavailable' });
+    await engine.startStrategy({ ...config, reduceOnly: true });
+    const tick = engine.tick();
+    await waitFor(() => gateway.createdOrders.length === 2);
+    expect(gateway.createdOrders).toEqual([
+      expect.objectContaining({ side: 'SELL', position_side: 'LONG', reduce_only: 'true' }),
+      expect.objectContaining({ side: 'BUY', position_side: 'SHORT', reduce_only: 'true' }),
+    ]);
+    ackOrder(runtime, 'remote-1', 'FILLED', '0.1', '100000');
+    ackOrder(runtime, 'remote-2', 'FILLED', '0.1', '100001');
+    await tick;
+  });
+
+  it('blocks orders if position mode changes after launch', async () => {
+    const { engine, gateway, markets } = await createHarness();
+    gateway.positionMode = 'DUAL';
+    markets.set(symbol, '100000', '100001');
+    await engine.startStrategy(config);
+    gateway.positionMode = 'SINGLE';
+    await engine.tick();
+    expect(gateway.createdOrders).toHaveLength(0);
+  });
+
+  it('keeps continuous bots cross-venue and rejects inconsistent same-contract settings', async () => {
+    const { engine, gateway, markets } = await createHarness();
+    gateway.positionMode = 'DUAL';
+    markets.set(symbol, '100000', '100001');
+    await expect(engine.startStrategy({ ...config, leftLeverage: '5', rightLeverage: '10' })).rejects.toThrow();
+    await expect(engine.startStrategy({ ...config, kind: 'auto', entryBps: '10', takeProfitBps: '2', maxPosition: '1' })).rejects.toThrow();
+    expect(gateway.createdOrders).toHaveLength(0);
+  });
+
+  it.each([
+    { makerLeg: 'left', reduceOnly: false, makerSide: 'SELL', makerPosition: 'SHORT', hedgeSide: 'BUY', hedgePosition: 'LONG' },
+    { makerLeg: 'right', reduceOnly: false, makerSide: 'BUY', makerPosition: 'LONG', hedgeSide: 'SELL', hedgePosition: 'SHORT' },
+    { makerLeg: 'left', reduceOnly: true, makerSide: 'SELL', makerPosition: 'LONG', hedgeSide: 'BUY', hedgePosition: 'SHORT' },
+    { makerLeg: 'right', reduceOnly: true, makerSide: 'BUY', makerPosition: 'SHORT', hedgeSide: 'SELL', hedgePosition: 'LONG' },
+  ] as const)('settles cancellation and racing fills before hedging $makerLeg / reduceOnly=$reduceOnly', async (settings) => {
+    const { engine, gateway, markets, runtime } = await createHarness();
+    gateway.positionMode = 'DUAL';
+    gateway.positions = [futuresPosition(symbol, 'SHORT', '0.3'), futuresPosition(symbol, 'LONG', '0.3')];
+    markets.set(symbol, '100000', '100001');
+    const record = await engine.startStrategy({ ...config, executionMethod: 'MAKER_TAKER', makerLeg: settings.makerLeg, reduceOnly: settings.reduceOnly });
+    await engine.tick();
+    expect(gateway.createdOrders).toHaveLength(1);
+    expect(gateway.createdOrders[0]).toMatchObject({ side: settings.makerSide, position_side: settings.makerPosition, time_in_force: 'POC' });
+    gateway.beforeCancel = (id) => {
+      if (id !== 'remote-1') return;
+      expect(gateway.createdOrders).toHaveLength(1);
+      gateway.setRemoteFill(id, '0.05');
+      ackOrder(runtime, id, 'PARTIALLY_FILLED', '0.05', '100000');
+    };
+    gateway.setRemoteFill('remote-1', '0.03');
+    ackOrder(runtime, 'remote-1', 'PARTIALLY_FILLED', '0.03', '100000');
+    await waitFor(() => gateway.createdOrders.length === 2);
+    expect(gateway.cancelledOrders).toEqual(['remote-1']);
+    expect(runtime.getOrder(runtime.listOrders().find((o) => o.remoteOrderId === 'remote-1')!.id).state).toBe('CANCELLED');
+    expect(gateway.createdOrders[1]).toMatchObject({ side: settings.hedgeSide, position_side: settings.hedgePosition, qty: '0.05', type: 'MARKET', reduce_only: String(settings.reduceOnly) });
+    // Duplicate reports cannot submit a second hedge for the same execution.
+    ackOrder(runtime, 'remote-1', 'CANCELLED', '0.05', '100000');
+    ackOrder(runtime, 'remote-2', 'FILLED', '0.05', '100000');
+    await engine.tick();
+    const nextMaker = gateway.createdOrders.find((o) => o.remoteId === 'remote-3');
+    expect(nextMaker).toMatchObject({ type: 'LIMIT', qty: '0.05', position_side: settings.makerPosition });
+    gateway.setRemoteFill('remote-3', '0.05', 'FILLED');
+    ackOrder(runtime, 'remote-3', 'FILLED', '0.05', '100000');
+    await waitFor(() => gateway.createdOrders.length === 4);
+    expect(gateway.createdOrders[3]).toMatchObject({ type: 'MARKET', qty: '0.05', position_side: settings.hedgePosition });
+    ackOrder(runtime, 'remote-4', 'FILLED', '0.05', '100000');
+    await waitFor(() => runtime.getStrategy(record.id).status === 'COMPLETED');
+  });
+
+  it('blocks hedge and replacement quotes while maker cancellation remains unconfirmed, then recovers', async () => {
+    let now = Date.now();
+    const { engine, gateway, markets, runtime } = await createHarness({ now: () => now, orderTimeoutMs: 40 });
+    gateway.positionMode = 'DUAL';
+    gateway.holdCancellations = true;
+    markets.set(symbol, '100000', '100001');
+    const record = await engine.startStrategy({ ...config, executionMethod: 'MAKER_TAKER', makerLeg: 'left' });
+    await engine.tick();
+    gateway.setRemoteFill('remote-1', '0.03');
+    ackOrder(runtime, 'remote-1', 'PARTIALLY_FILLED', '0.03', '100001');
+    await waitFor(() => runtime.strategyLogs(record.id).some((l) => l.event === 'Same-venue hedge waiting for cancellation'));
+    await engine.tick();
+    expect(gateway.createdOrders).toHaveLength(1);
+    gateway.setRemoteFill('remote-1', '0.05', 'CANCELLED');
+    now += 2000;
+    const recovery = engine.tick();
+    await waitFor(() => gateway.createdOrders.length === 2);
+    expect(gateway.createdOrders[1]).toMatchObject({ type: 'MARKET', qty: '0.05', position_side: 'LONG' });
+    ackOrder(runtime, 'remote-2', 'FILLED', '0.05', '100000');
+    await recovery;
+  });
+
+  it('does not replace a same-contract maker while its taker is still unresolved', async () => {
+    const { engine, gateway, markets, runtime } = await createHarness({ orderTimeoutMs: 40 });
+    gateway.positionMode = 'DUAL';
+    markets.set(symbol, '100000', '100001');
+    await engine.startStrategy({ ...config, executionMethod: 'MAKER_TAKER', makerLeg: 'left' });
+    await engine.tick();
+    gateway.setRemoteFill('remote-1', '0.03');
+    ackOrder(runtime, 'remote-1', 'PARTIALLY_FILLED', '0.03', '100001');
+    await waitFor(() => gateway.createdOrders.length === 2);
+    await engine.tick();
+    expect(gateway.createdOrders).toHaveLength(2);
+    expect(gateway.createdOrders.filter((o) => o.type === 'LIMIT')).toHaveLength(1);
+  });
+
+  it('confirms a requote cancellation and hedges fills racing it before placing a replacement', async () => {
+    let now = Date.now();
+    const { engine, gateway, markets, runtime } = await createHarness({ now: () => now, orderTimeoutMs: 40 });
+    gateway.positionMode = 'DUAL';
+    markets.set(symbol, '100000', '100001');
+    await engine.startStrategy({ ...config, executionMethod: 'MAKER_TAKER', makerLeg: 'left' });
+    await engine.tick();
+    gateway.holdCancellations = true;
+    gateway.beforeCancel = (id) => {
+      gateway.setRemoteFill(id, '0.03');
+      ackOrder(runtime, id, 'PARTIALLY_FILLED', '0.03', '100001');
+    };
+    now += 20;
+    markets.set(symbol, '100010', '100011');
+    await engine.tick();
+    expect(gateway.cancelledOrders).toEqual(['remote-1']);
+    expect(gateway.createdOrders).toHaveLength(1);
+    gateway.beforeCancel = undefined;
+    gateway.holdCancellations = false;
+    now += 2000;
+    const recovery = engine.tick();
+    await waitFor(() => gateway.createdOrders.length === 2);
+    expect(gateway.createdOrders[1]).toMatchObject({ type: 'MARKET', qty: '0.03', position_side: 'LONG' });
+    ackOrder(runtime, 'remote-2', 'FILLED', '0.03', '100010');
+    await recovery;
+    await engine.tick();
+    expect(gateway.createdOrders[2]).toMatchObject({ type: 'LIMIT', qty: '0.07', position_side: 'SHORT' });
   });
 });

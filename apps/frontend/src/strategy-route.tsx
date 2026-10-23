@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CrossExRiskLimitTier } from '@gate-crossex/shared-types';
+import { manualOrderPositionSide, type CrossExRiskLimitTier } from '@gate-crossex/shared-types';
 import {
   api,
   ApiError,
@@ -409,6 +409,7 @@ export function RunningStrategiesPanel({ strategies, authenticatedPortfolio, tra
 }
 
 interface StrategyViewProps {
+  accountProfileId?: string | null;
   mode: Exclude<StrategyKind, 'premium'>;
   prefill?: PairedPositionPrefill | null;
   marketSnapshot: MarketSnapshot | null;
@@ -425,7 +426,7 @@ interface StrategyViewProps {
   watchQuotes: (symbols: string[]) => void;
 }
 
-export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, strategies, balances, authenticatedPortfolio, tradingSnapshot, tradingMode, onOpenModeDialog, onStrategiesChanged, onPositionsRefresh, watchQuotes }: StrategyViewProps) {
+export function StrategyView({ accountProfileId, mode, prefill, marketSnapshot, catalog, fees, strategies, balances, authenticatedPortfolio, tradingSnapshot, tradingMode, onOpenModeDialog, onStrategiesChanged, onPositionsRefresh, watchQuotes }: StrategyViewProps) {
   const { language, theme, t } = useLanguage();
   const [directionFlipped, setDirectionFlipped] = useState(false);
   const [reduceOnly, setReduceOnly] = useState(false);
@@ -469,6 +470,29 @@ export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, str
   );
   const leftHistorySymbol = strategyVenueSymbol(catalog, leftExchange.id, asset);
   const rightHistorySymbol = strategyVenueSymbol(catalog, rightExchange.id, asset);
+  const sameVenueHedge = mode === 'position' && leftHistorySymbol === rightHistorySymbol;
+  const sameVenueModeKey = `${leftHistorySymbol}:${accountProfileId ?? ''}:${tradingMode}`;
+  const [sameVenueModeState, setSameVenueModeState] = useState<{ key: string; mode: 'SINGLE' | 'DUAL' | null } | null>(null);
+  const sameVenueMode = sameVenueModeState?.key === sameVenueModeKey ? sameVenueModeState.mode : null;
+  const changeLeftLeverage = useCallback((value: string) => {
+    setLeftLeverage(value);
+    if (sameVenueHedge) setRightLeverage(value);
+  }, [sameVenueHedge]);
+  const changeRightLeverage = useCallback((value: string) => {
+    setRightLeverage(value);
+    if (sameVenueHedge) setLeftLeverage(value);
+  }, [sameVenueHedge]);
+  useEffect(() => {
+    if (!sameVenueHedge) return;
+    let cancelled = false;
+    void api.positionMode(leftHistorySymbol).then((result) => {
+      if (!cancelled) setSameVenueModeState({ key: sameVenueModeKey, mode: result.positionMode });
+    }).catch(() => {
+      if (!cancelled) setSameVenueModeState({ key: sameVenueModeKey, mode: null });
+    });
+    return () => { cancelled = true; };
+  }, [sameVenueHedge, sameVenueModeKey, leftHistorySymbol]);
+
   const leftInstrument = instruments?.find((instrument) => instrument.symbol === leftHistorySymbol);
   const rightInstrument = instruments?.find((instrument) => instrument.symbol === rightHistorySymbol);
   const positionFundingRangeLabel = POSITION_FUNDING_RANGES.find((range) => range.days === positionFundingDuration)?.label ?? '30D';
@@ -632,8 +656,10 @@ export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, str
   const sharedMarginMode = usesSharedCrossExMargin(authenticatedPortfolio);
   const leftBalanceUnit = balanceUnitFor(authenticatedPortfolio, leftExchange.id);
   const rightBalanceUnit = balanceUnitFor(authenticatedPortfolio, rightExchange.id);
-  const leftPortfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === leftHistorySymbol);
-  const rightPortfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === rightHistorySymbol);
+  const leftPortfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === leftHistorySymbol
+    && (!sameVenueHedge || position.positionSide === manualOrderPositionSide('DUAL', directionFlipped ? 'BUY' : 'SELL', reduceOnly)));
+  const rightPortfolioPosition = authenticatedPortfolio?.snapshot.futuresPositions?.find((position) => position.symbol === rightHistorySymbol
+    && (!sameVenueHedge || position.positionSide === manualOrderPositionSide('DUAL', directionFlipped ? 'SELL' : 'BUY', reduceOnly)));
   const configuredTarget = Number(mode === 'position' ? amount : maxPosition) || 0;
   const leftLeverageNumber = mode === 'position' ? Number(leftLeverage) || 0 : 1;
   const rightLeverageNumber = mode === 'position' ? Number(rightLeverage) || 0 : 1;
@@ -691,6 +717,7 @@ export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, str
     && instrumentsReady
     && sizeIssues.length === 0;
   const strategyInputsValid = sizeInputsValid && !marginInsufficient
+    && (!sameVenueHedge || (sameVenueMode === 'DUAL' && leftLeverage === rightLeverage))
     && (mode !== 'position' || reduceOnly || (!positionRiskReviewUnavailable && !positionRiskLimitExceeded));
 
   useEffect(() => {
@@ -803,17 +830,20 @@ export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, str
   const strategySetup = (
     <article className="strategy-panel strategy-rules compact strategy-rules-sidebar terminal-panel">
       <header className="strategy-panel-head"><div><p className="eyebrow">{t('Strategy setup')}</p><h2>{t(mode === 'position' ? 'Configure cross-exchange hedge' : 'Configure continuous bot')}</h2></div></header>
+      {sameVenueHedge && <p className="same-venue-hedge-note" role="status">{t(sameVenueMode === 'DUAL'
+        ? 'Same-venue hedge: dual positions and shared leverage. After maker fills, remaining quotes are confirmed cancelled before hedging.'
+        : 'Same-venue hedging requires verified dual position mode. Check the account mode and reselect the venue.')}</p>}
       <div className="compact-fields">{mode === 'position' ? <>
         <label><span>{t('Per-order quantity')}</span><div><input placeholder="e.g. 0.10" value={positionOrderQuantity} onChange={(event) => setPositionOrderQuantity(event.target.value)} /><b>{asset}</b></div></label>
         <label><span>{t('Total amount')}</span><div><input placeholder="e.g. 1.00" value={amount} onChange={(event) => setAmount(event.target.value)} /><b>{asset}</b></div></label>
         <StrategyLeverageControl label="Exchange A leverage" symbol={leftHistorySymbol} exchangeName={leftExchange.name}
           asset={asset} quote={quoteFor(leftExchange.id)} value={leftLeverage} referencePrice={leftPrice}
           fallbackCurrent={leftPortfolioPosition?.leverage} fallbackMax={leftPortfolioPosition?.maxLeverage}
-          tradingMode={tradingMode} disabled={reduceOnly} onOpenModeDialog={onOpenModeDialog} onValueChange={setLeftLeverage} onRiskLimitChange={setLeftRiskPositionValue} />
+          tradingMode={tradingMode} disabled={reduceOnly} onOpenModeDialog={onOpenModeDialog} onValueChange={changeLeftLeverage} onRiskLimitChange={setLeftRiskPositionValue} />
         <StrategyLeverageControl label="Exchange B leverage" symbol={rightHistorySymbol} exchangeName={rightExchange.name}
           asset={asset} quote={quoteFor(rightExchange.id)} value={rightLeverage} referencePrice={rightPrice}
           fallbackCurrent={rightPortfolioPosition?.leverage} fallbackMax={rightPortfolioPosition?.maxLeverage}
-          tradingMode={tradingMode} disabled={reduceOnly} onOpenModeDialog={onOpenModeDialog} onValueChange={setRightLeverage} onRiskLimitChange={setRightRiskPositionValue} />
+          tradingMode={tradingMode} disabled={reduceOnly} onOpenModeDialog={onOpenModeDialog} onValueChange={changeRightLeverage} onRiskLimitChange={setRightRiskPositionValue} />
         <label><span>{t('Entry threshold')}</span><div><input value={threshold} onChange={(event) => setThreshold(event.target.value)} /><b>bps</b></div></label>
         <label className="reduce-only-control"><span onClick={(event) => event.preventDefault()}>{t('Position handling')}</span><div><input type="checkbox" checked={reduceOnly} onChange={(event) => setReduceOnly(event.target.checked)} /><b>{t('Reduce only')}</b></div></label>
       </> : <><label><span>{t('Order quantity')}</span><div><input placeholder="e.g. 0.05" value={orderQuantity} onChange={(event) => setOrderQuantity(event.target.value)} /><b>{asset}</b></div></label><label><span>{t('Max position')}</span><div><input placeholder="e.g. 2.00" value={maxPosition} onChange={(event) => setMaxPosition(event.target.value)} /><b>{asset}</b></div></label><label><span>{t('Entry threshold')}</span><div><input value={threshold} onChange={(event) => setThreshold(event.target.value)} /><b>bps</b></div></label><label><span>{t('Take-profit threshold')}</span><div><input value={takeProfitThreshold} onChange={(event) => setTakeProfitThreshold(event.target.value)} /><b>bps</b></div></label></>}</div>
@@ -845,7 +875,7 @@ export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, str
                 <VenueSelect
                   label={t('Exchange A')}
                   menuSubtitle={`${asset} ${t('Perpetual').toLowerCase()}`}
-                  options={exchanges.map((venue) => ({ ...venue, disabled: venue.id === rightExchangeId, detail: marketSymbol(asset, quoteFor(venue.id), 'perpetual') }))}
+                  options={exchanges.map((venue) => ({ ...venue, disabled: mode !== 'position' && venue.id === rightExchangeId, detail: marketSymbol(asset, quoteFor(venue.id), 'perpetual') }))}
                   value={leftExchangeId}
                   onSelect={setLeftExchangeId}
                 />
@@ -868,7 +898,7 @@ export function StrategyView({ mode, prefill, marketSnapshot, catalog, fees, str
                 <VenueSelect
                   label={t('Exchange B')}
                   menuSubtitle={`${asset} ${t('Perpetual').toLowerCase()}`}
-                  options={exchanges.map((venue) => ({ ...venue, disabled: venue.id === leftExchangeId, detail: marketSymbol(asset, quoteFor(venue.id), 'perpetual') }))}
+                  options={exchanges.map((venue) => ({ ...venue, disabled: mode !== 'position' && venue.id === leftExchangeId, detail: marketSymbol(asset, quoteFor(venue.id), 'perpetual') }))}
                   value={rightExchangeId}
                   onSelect={setRightExchangeId}
                 />

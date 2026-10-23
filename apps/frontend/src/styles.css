@@ -2216,3 +2216,8 @@ html[data-theme='light'] .boros-kpi-detail button { border-color: #bccbf0; color
 html[data-theme='light'] .boros-guide-icon { color: #2f5ec4; background: #e8effc; }
 html[data-theme='light'] .boros-guide-icon.shield { color: #00795f; background: #e2f5ef; }
 html[data-theme='light'] .activity-message button { border-color: #cbd6de; color: #5a6875; background: #f5f8fa; }
+
+.same-venue-hedge-note { padding: 10px 12px; margin: 0 12px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: var(--text-small); line-height: 1.5; }
+
+/* Keep contract options above both exchange controls in the market panel. */
+.strategy-market-panel > .strategy-panel-head { position: relative; z-index: 40; }

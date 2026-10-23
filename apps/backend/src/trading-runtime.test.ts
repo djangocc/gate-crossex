@@ -649,6 +649,21 @@ describe('private event ingestion guards', () => {
     expect(corrected.executedQuantity).toBe('0.1');
   });
 
+  it('retains a racing private fill when REST confirms cancellation with an older executed quantity', async () => {
+    const { runtime } = await createHarness({
+      queryOrder: (orderId) => {
+        runtime.ingestPrivateEvent({ channel: 'order', payload: {
+          order_id: orderId, state: 'PARTIALLY_FILLED', executed_qty: '0.05', executed_avg_price: '100100',
+        } });
+        return remoteOrder({ order_id: orderId, state: 'CANCELLED', executed_qty: '0.03', executed_avg_price: '99000' });
+      },
+    });
+    const order = await runtime.createOrder(marketOrderInput);
+    await expect(runtime.refreshOrderFromRemote(order.id)).resolves.toMatchObject({
+      state: 'CANCELLED', executedQuantity: '0.05', executedAveragePrice: '100100',
+    });
+  });
+
   it('merges partial balance pushes instead of zeroing omitted fields', async () => {
     const { runtime } = await createHarness();
     const emitted: Array<Record<string, string>> = [];
