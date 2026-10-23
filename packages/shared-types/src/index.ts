@@ -957,6 +957,41 @@ export const BorosStrategiesResponseSchema = BorosUpstreamStrategiesResponseSche
 });
 export type BorosStrategiesResponse = z.infer<typeof BorosStrategiesResponseSchema>;
 
+export const TwapPlanSchema = z.object({
+  requestId: z.uuid(),
+  symbol: z.string().regex(/^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/),
+  side: z.enum(['BUY', 'SELL']), quantity: PositiveDecimalTextSchema.max(80),
+  durationSeconds: z.number().int().min(1).max(86_400),
+  intervalSeconds: z.number().int().min(1).max(86_400),
+  expectedPositionMode: z.enum(['SINGLE', 'DUAL']),
+  positionSide: z.enum(['NONE', 'LONG', 'SHORT']),
+}).refine((plan) => plan.intervalSeconds <= plan.durationSeconds
+  && Math.ceil(plan.durationSeconds / plan.intervalSeconds) <= 10_000, { message: 'Invalid timed execution schedule' });
+export type TwapPlan = z.infer<typeof TwapPlanSchema>;
+
+/** Exact lot-based allocation shared by the preview and the execution engine. */
+export function twapSlices(quantity: string, lotSize: string, durationSeconds: number, intervalSeconds: number): string[] {
+  const count = Math.ceil(durationSeconds / intervalSeconds);
+  if (!Number.isInteger(durationSeconds) || !Number.isInteger(intervalSeconds) || intervalSeconds < 1
+    || intervalSeconds > durationSeconds || durationSeconds > 86_400 || count > 10_000) throw new Error('twap_invalid_schedule');
+  const values = [quantity, lotSize];
+  if (values.some((value) => value.length > 80 || !/^\d+(?:\.\d+)?$/.test(value))) throw new Error('twap_invalid_quantity');
+  const scale = Math.max(...values.map((value) => value.split('.')[1]?.length ?? 0));
+  const integer = (value: string) => {
+    const [whole, fraction = ''] = value.split('.');
+    return BigInt(whole + fraction.padEnd(scale, '0'));
+  };
+  const total = integer(quantity), lot = integer(lotSize);
+  if (total <= 0n || lot <= 0n || total % lot !== 0n) throw new Error('strategy_order_invalid_lot_size');
+  const units = total / lot, base = units / BigInt(count), extra = units % BigInt(count);
+  if (base === 0n) throw new Error('strategy_order_below_minimum_size');
+  return Array.from({ length: count }, (_, index) => {
+    const raw = ((base + (BigInt(index) < extra ? 1n : 0n)) * lot).toString().padStart(scale + 1, '0');
+    if (!scale) return raw;
+    return `${raw.slice(0, -scale)}.${raw.slice(-scale)}`.replace(/\.?0+$/, '');
+  });
+}
+
 export const StrategyConfigSchema = z.object({
   kind: z.enum(['position', 'auto', 'premium']),
   asset: z.string(),
@@ -983,6 +1018,7 @@ export const StrategyConfigSchema = z.object({
   reduceOnly: z.boolean(),
   executionMethod: z.enum(['TAKER_TAKER', 'MAKER_TAKER']),
   makerLeg: z.enum(['left', 'right']).optional(),
+  twapPlan: TwapPlanSchema.optional(),
   closePlan: z.object({
     orderCount: z.number().int().min(2).max(100),
     intervalSeconds: z.number().int().min(1).max(86_400),

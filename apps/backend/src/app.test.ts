@@ -1129,6 +1129,41 @@ describe('local backend', () => {
     expect(stop.json()).toMatchObject({ id, status: 'STOPPED' });
   });
 
+  it('accepts TWAP ids for logs, expired resume and stop through HTTP without placing orders', async () => {
+    const { app, database, gateway } = await createTestApp({ liveTradingEnabled: true });
+    const id = 'TWAP-ABC12345';
+    const createdAt = new Date(Date.now() - 120_000).toISOString();
+    const config = {
+      kind: 'position', asset: 'BTC', leftVenue: 'BINANCE', rightVenue: 'BINANCE',
+      leftSide: 'SELL', rightSide: 'BUY', totalAmount: '1', perOrderQuantity: '0.1',
+      reduceOnly: false, executionMethod: 'TAKER_TAKER',
+      twapPlan: {
+        requestId: 'ca2f9954-6eac-4bf1-9a92-8b43d4db6691', symbol: 'BINANCE_FUTURE_BTC_USDT',
+        side: 'SELL', quantity: '1', durationSeconds: 60, intervalSeconds: 10,
+        expectedPositionMode: 'SINGLE', positionSide: 'NONE',
+      },
+    };
+    database.prepare(`INSERT INTO execution_strategies (id, kind, environment, status, config_json, progress,
+      filled_quantity, filled_left, filled_right, open_position, created_at, updated_at, stopped_at)
+      VALUES (?, 'position', 'live', 'PAUSED', ?, 0, '0', '0', '0', '0', ?, ?, NULL)`)
+      .run(id, JSON.stringify(config), createdAt, createdAt);
+    const host = { host: '127.0.0.1:17840' };
+    const logs = await app.inject({ method: 'GET', url: `/api/strategies/${id}/logs`, headers: host });
+    expect(logs.statusCode).toBe(200);
+    expect(logs.json()).toEqual({ logs: [] });
+    const resume = await app.inject({ method: 'POST', url: `/api/strategies/${id}/resume`, headers: {
+      ...host, 'x-gct-trading-intent': 'resume-strategy',
+    } });
+    expect(resume.statusCode).toBe(409);
+    expect(resume.json()).toMatchObject({ error: 'twap_time_expired' });
+    const stop = await app.inject({ method: 'POST', url: `/api/strategies/${id}/stop`, headers: {
+      ...host, 'x-gct-trading-intent': 'stop-strategy',
+    } });
+    expect(stop.statusCode).toBe(200);
+    expect(stop.json()).toMatchObject({ id, status: 'STOPPED' });
+    expect(gateway.createdOrders).toHaveLength(0);
+  });
+
   it('serves merged candle series with venue backfill and validates parameters', async () => {
     const { app, publicMarketGateway } = await createTestApp();
     const headers = { host: '127.0.0.1:17840' };

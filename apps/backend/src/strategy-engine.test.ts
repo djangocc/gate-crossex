@@ -7,7 +7,7 @@ import { loadConfig } from './config.js';
 import { openDatabase } from './database.js';
 import { DEFAULT_CREDENTIAL_PROFILE, MemoryCredentialVault, type GateCredentials } from './credential-vault.js';
 import { GateApiError, type CrossExOrderRequest, type GateCrossExAccount, type GateCrossExOrder, type GateCrossExPortfolio, type GateCrossExRiskLimit, type GateCrossExSymbol, type GateFeeRate, type GateOrderActionResponse, type TradingCrossExGateway } from './crossex-client.js';
-import type { LiveMarket } from './market-hub.js';
+import { CrossExMarketHub, type LiveMarket } from './market-hub.js';
 import { StrategyEngine, type MarketSource, type StrategyEngineOptions } from './strategy-engine.js';
 import { TradingRuntime } from './trading-runtime.js';
 import { TradingSession } from './trading-session.js';
@@ -204,6 +204,7 @@ class StubMarkets implements MarketSource {
 }
 
 interface Harness {
+  session: TradingSession;
   database: Database.Database;
   runtime: TradingRuntime;
   engine: StrategyEngine;
@@ -232,7 +233,7 @@ async function createHarness(engineOptions: StrategyEngineOptions = {}): Promise
     tickIntervalMs: 20, orderTimeoutMs: 400, requoteIntervalMs: 10, repairCooldownMs: 0,
     ...engineOptions,
   });
-  const harness = { database, runtime, engine, gateway, markets, directory };
+  const harness = { session, database, runtime, engine, gateway, markets, directory };
   harnesses.push(harness);
   return harness;
 }
@@ -297,6 +298,253 @@ const takerTakerConfig = {
   kind: 'position', asset: 'BTC', leftVenue: 'BINANCE', rightVenue: 'OKX', leftSide: 'SELL', rightSide: 'BUY',
   entryBps: '10', totalAmount: '0.2', perOrderQuantity: '0.1', reduceOnly: false, executionMethod: 'TAKER_TAKER',
 } as const;
+
+describe('TWAP execution', () => {
+  function config(reduceOnly = false, durationSeconds = 60, intervalSeconds = 10) {
+    return { kind: 'position', asset: 'BTC', leftVenue: 'BINANCE', rightVenue: 'BINANCE', leftSide: 'SELL', rightSide: 'BUY',
+      totalAmount: '100', perOrderQuantity: '17', reduceOnly, executionMethod: 'TAKER_TAKER', leftLeverage: '1', rightLeverage: '1',
+      twapPlan: { requestId: 'fd982912-7a1c-4cd2-9828-af1de88eb031', symbol: 'BINANCE_FUTURE_BTC_USDT', side: 'SELL', quantity: '100',
+        durationSeconds, intervalSeconds, expectedPositionMode: 'SINGLE', positionSide: 'NONE' } } as const;
+  }
+  function setup(h: Harness, now: number) {
+    const symbol = 'BINANCE_FUTURE_BTC_USDT';
+    h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+    h.database.prepare("UPDATE crossex_instruments SET lot_size = '1', min_size = '1' WHERE symbol = ?").run(symbol);
+    return symbol;
+  }
+
+  it('allocates the exact total and respects intervals for ordinary single-mode market orders', async () => {
+    let now = Date.now();
+    const h = await createHarness({ now: () => now });
+    const symbol = setup(h, now);
+    const record = await h.engine.startStrategy(config());
+    now = Date.parse(record.createdAt) + 100;
+    const sizes = ['17', '17', '17', '17', '16', '16'];
+    for (let index = 0; index < sizes.length; index++) {
+      h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+      const tick = h.engine.tick();
+      await waitFor(() => h.gateway.createdOrders.length === index + 1);
+      expect(h.gateway.createdOrders[index]).toMatchObject({ qty: sizes[index], type: 'MARKET', reduce_only: 'false', position_side: 'NONE' });
+      ackOrder(h.runtime, `remote-${index + 1}`, 'FILLED', sizes[index]!, '100');
+      await tick;
+      if (index < sizes.length - 1) {
+        now += 9999;
+        h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+        await h.engine.tick();
+        expect(h.gateway.createdOrders).toHaveLength(index + 1);
+        now += 1;
+      }
+    }
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'COMPLETED', progress: 100, filledQuantity: '100' });
+    expect(h.gateway.createdOrders.reduce((sum, order) => sum + Number(order.qty), 0)).toBe(100);
+  });
+
+  it('verifies dual-mode close directions, preserves leverage and pauses when the position disappears', async () => {
+    let now = Date.now();
+    const h = await createHarness({ now: () => now });
+    const symbol = setup(h, now);
+    h.gateway.positionMode = 'DUAL';
+    h.gateway.positions = [futuresPosition(symbol, 'LONG', '100'), futuresPosition(symbol, 'SHORT', '100')];
+    const base = config(true);
+    const record = await h.engine.startStrategy({ ...base, twapPlan: { ...base.twapPlan, expectedPositionMode: 'DUAL', positionSide: 'LONG' } });
+    expect(h.gateway.leverageUpdates).toHaveLength(0);
+    now = Date.parse(record.createdAt) + 100;
+    const first = h.engine.tick();
+    await waitFor(() => h.gateway.createdOrders.length === 1);
+    expect(h.gateway.createdOrders[0]).toMatchObject({ position_side: 'LONG', side: 'SELL', reduce_only: 'true' });
+    ackOrder(h.runtime, 'remote-1', 'FILLED', '17', '100'); await first;
+    h.gateway.positions = [futuresPosition(symbol, 'SHORT', '100')];
+    now += 10000;h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+    await h.engine.tick();
+    expect(h.gateway.createdOrders).toHaveLength(1);
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'PAUSED', filledQuantity: '17', progress: 17 });
+  });
+
+  it.each([
+    [false, 'BUY', 'LONG'], [false, 'SELL', 'SHORT'], [true, 'BUY', 'SHORT'], [true, 'SELL', 'LONG'],
+  ] as const)('routes dual orders correctly: reduce=%s side=%s leg=%s', async (reduceOnly, side, positionSide) => {
+    let now=Date.now();const h=await createHarness({now:()=>now});const symbol=setup(h,now);
+    h.gateway.positionMode='DUAL';h.gateway.positions=[futuresPosition(symbol,'LONG','100'),futuresPosition(symbol,'SHORT','100')];
+    const base=config(reduceOnly,60,60);
+    const record=await h.engine.startStrategy({...base,leftSide:side,rightSide:side==='BUY'?'SELL':'BUY',twapPlan:{...base.twapPlan,side,expectedPositionMode:'DUAL',positionSide}});
+    now=Date.parse(record.createdAt)+100;
+    const tick=h.engine.tick();await waitFor(()=>h.gateway.createdOrders.length===1);
+    expect(h.gateway.createdOrders[0]).toMatchObject({side,position_side:positionSide,reduce_only:String(reduceOnly),qty:'100'});
+    ackOrder(h.runtime,'remote-1','FILLED','100','100');await tick;
+    expect(h.runtime.getStrategy(record.id).status).toBe('COMPLETED');
+  });
+
+  it('pauses after a partial cancelled fill without retrying or reporting completion', async () => {
+    let now = Date.now();const h = await createHarness({ now: () => now });setup(h, now);
+    const record = await h.engine.startStrategy(config());now = Date.parse(record.createdAt) + 100;
+    const tick = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 1);
+    ackOrder(h.runtime, 'remote-1', 'CANCELLED', '4', '100');await tick;
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'PAUSED', progress: 4, filledQuantity: '4' });
+    now += 10000;await h.engine.tick();expect(h.gateway.createdOrders).toHaveLength(1);
+  });
+
+  it('expires instead of sending catch-up bursts and refuses an expired resume', async () => {
+    let now = Date.now();const h = await createHarness({ now: () => now });const symbol = setup(h, now);
+    const record = await h.engine.startStrategy(config(false, 30, 10));now = Date.parse(record.createdAt) + 100;
+    const tick = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 1);
+    ackOrder(h.runtime, 'remote-1', 'FILLED', '34', '100');await tick;
+    now += 25000;h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+    const late = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 2);
+    ackOrder(h.runtime, 'remote-2', 'FILLED', '33', '100');await late;
+    await h.engine.tick();expect(h.gateway.createdOrders).toHaveLength(2);
+    now += 5000;await h.engine.tick();
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'PAUSED', filledQuantity: '67' });
+    await expect(h.engine.resumeStrategy(record.id, 'profile')).rejects.toMatchObject({ code: 'twap_time_expired' });
+  });
+
+  it('pauses on rejected orders and never submits after a position-mode change', async () => {
+    let now = Date.now();const h = await createHarness({ now: () => now });const symbol = setup(h, now);
+    const record = await h.engine.startStrategy(config());now = Date.parse(record.createdAt) + 100;
+    h.gateway.positionMode = 'DUAL';
+    await h.engine.tick();expect(h.gateway.createAttempts).toHaveLength(0);
+    expect(h.runtime.getStrategy(record.id).status).toBe('PAUSED');
+    const h2 = await createHarness({ now: () => now });setup(h2, now);
+    const rejected = await h2.engine.startStrategy(config());now = Date.parse(rejected.createdAt) + 100;
+    h2.gateway.failCreate(symbol, 1);await h2.engine.tick();
+    expect(h2.gateway.createAttempts).toHaveLength(1);expect(h2.gateway.createdOrders).toHaveLength(0);
+    expect(h2.runtime.getStrategy(rejected.id).status).toBe('PAUSED');
+  });
+
+  it('makes repeated and concurrent start requests idempotent and rejects changed parameters', async () => {
+    const h = await createHarness();setup(h, Date.now());
+    const [a,b] = await Promise.all([h.engine.startStrategy(config()), h.engine.startStrategy(config())]);
+    expect(a.id).toBe(b.id);expect(h.runtime.listStrategies()).toHaveLength(1);
+    expect((await h.engine.startStrategy(config())).id).toBe(a.id);
+    const changed=config();await expect(h.engine.startStrategy({ ...changed, reduceOnly: true })).rejects.toMatchObject({ code: 'twap_request_conflict' });
+    expect(h.gateway.createdOrders).toHaveLength(0);
+  });
+
+  it('rejects undersized, oversized and off-step plans before scheduling orders', async () => {
+    const h = await createHarness();const symbol = setup(h, Date.now());
+    await expect(h.engine.startStrategy({ ...config(), twapPlan: { ...config().twapPlan, quantity: '1.1' } })).rejects.toMatchObject({ code: 'strategy_order_invalid_lot_size' });
+    h.database.prepare("UPDATE crossex_instruments SET max_market_size = '10' WHERE symbol = ?").run(symbol);
+    await expect(h.engine.startStrategy(config())).rejects.toMatchObject({ code: 'twap_slice_above_maximum_size' });
+    expect(h.runtime.listStrategies()).toHaveLength(0);expect(h.gateway.createdOrders).toHaveLength(0);
+  });
+
+  it('checks the deadline again after asynchronous order preflights', async () => {
+    let now = Date.now();const h = await createHarness({ now: () => now });setup(h, now);
+    const record = await h.engine.startStrategy(config(false, 2, 1));now = Date.parse(record.createdAt) + 100;
+    const original=h.gateway.queryLeverages.bind(h.gateway);
+    h.gateway.queryLeverages=async (...args) => { now = Date.parse(record.createdAt) + 2000; return original(...args); };
+    await h.engine.tick();expect(h.gateway.createdOrders).toHaveLength(0);
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'PAUSED', filledQuantity: '0' });
+  });
+
+  it('honors a stop while preflight is in flight without submitting a market order', async () => {
+    const h=await createHarness();setup(h,Date.now());const record=await h.engine.startStrategy(config());
+    let release!: () => void;let entered=false;const blocked=new Promise<void>((resolve)=>{release=resolve;});
+    const original=h.gateway.queryAccount.bind(h.gateway);
+    h.gateway.queryAccount=async (...args)=>{entered=true;await blocked;return original(...args);};
+    const tick=h.engine.tick();await waitFor(()=>entered);
+    const stopping=h.engine.stopStrategy(record.id);release();await tick;await stopping;
+    expect(h.gateway.createdOrders).toHaveLength(0);expect(h.runtime.getStrategy(record.id).status).toBe('STOPPED');
+  });
+
+  it('spaces slices from actual submission after a slow asynchronous preflight', async () => {
+    let now = Date.now();
+    const h = await createHarness({ now: () => now });
+    const symbol = setup(h, now);
+    const record = await h.engine.startStrategy(config());
+    now = Date.parse(record.createdAt) + 100;
+    const original = h.gateway.queryAccount.bind(h.gateway);
+    let slow = true;
+    h.gateway.queryAccount = async (...args) => {
+      if (slow) { now += 9000; slow = false; }
+      return original(...args);
+    };
+    const tick = h.engine.tick();
+    await waitFor(() => h.gateway.createdOrders.length === 1);
+    ackOrder(h.runtime, 'remote-1', 'FILLED', '17', '100');await tick;
+    now += 1000;h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+    await h.engine.tick();expect(h.gateway.createdOrders).toHaveLength(1);
+    now += 9000;h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+    const next = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 2);
+    ackOrder(h.runtime, 'remote-2', 'FILLED', '17', '100');await next;
+    expect(h.runtime.getStrategy(record.id).filledQuantity).toBe('34');
+  });
+
+  it('preserves partial fills while a stop waits for remote cancellation without sending hedge orders', async () => {
+    let now = Date.now();
+    const h = await createHarness({ now: () => now });setup(h, now);
+    const record = await h.engine.startStrategy(config());now = Date.parse(record.createdAt) + 100;
+    h.gateway.holdCancellations = true;
+    const tick = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 1);
+    ackOrder(h.runtime, 'remote-1', 'PARTIALLY_FILLED', '4', '100');
+    const stopping = h.engine.stopStrategy(record.id);
+    await tick;await expect(stopping).rejects.toMatchObject({ code: 'strategy_stop_pending_remote' });
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'STOP_PENDING_REMOTE', progress: 4, filledQuantity: '4' });
+    await h.engine.tick();
+    expect(h.runtime.getStrategy(record.id).filledQuantity).toBe('4');
+    expect(h.gateway.createdOrders).toHaveLength(1);
+    h.gateway.holdCancellations = false;
+    await h.engine.tick();
+    expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'STOPPED', progress: 4, filledQuantity: '4' });
+    expect(h.gateway.createdOrders).toHaveLength(1);
+  });
+
+  it('does not restart an expired persisted task after a process restart', async () => {
+    let now=Date.now();const h=await createHarness({now:()=>now});setup(h,now);
+    const record=await h.engine.startStrategy(config(false,10,5));await h.engine.stop();
+    now=Date.parse(record.createdAt)+11000;
+    h.engine=new StrategyEngine(h.database,h.session,h.runtime,h.markets,{now:()=>now,orderTimeoutMs:100});
+    h.engine.activatePersistedStrategies();await h.engine.tick();
+    expect(h.gateway.createdOrders).toHaveLength(0);expect(h.runtime.getStrategy(record.id).status).toBe('PAUSED');
+  });
+
+  it('keeps a dynamic contract alive between hourly slices after the browser disconnects', async () => {
+    let now = Date.now();
+    const h = await createHarness({ now: () => now });
+    await h.engine.stop();
+    const hub = new CrossExMarketHub('ws://127.0.0.1:1');
+    const symbol = 'BINANCE_FUTURE_TESTTWAP_USDT';
+    const definition = { symbol, venue: 'BINANCE', asset: 'TESTTWAP' } as const;
+    h.markets.set(symbol, '100', '101', new Date(now).toISOString());
+    h.database.prepare("UPDATE crossex_instruments SET lot_size = '1', min_size = '1' WHERE symbol = ?").run(symbol);
+    const internals = hub as unknown as {
+      dynamicMarkets: Map<string, number>;
+      evictIdleDynamicMarkets(): void;
+      handleMessage(raw: string, receivedAt: number): boolean;
+    };
+    const quote = () => {
+      expect(internals.handleMessage(JSON.stringify({ channel: 'ticker', event: 'update', result: {
+        s: symbol, lp: '100', bp: '100', bs: '10', ap: '101', as: '10', o: '100', h: '101', l: '100', v: '1000', ts: now,
+      } }), now)).toBe(true);
+    };
+    hub.ensureMarkets([definition]);quote();
+    const disconnectBrowser = hub.watchQuotes([symbol]);
+    h.engine = new StrategyEngine(h.database, h.session, h.runtime, {
+      market: (target) => hub.market(target),
+      ensureMarket: (target) => target === symbol && hub.ensureMarkets([definition]),
+    }, { now: () => now, orderTimeoutMs: 400 });
+    try {
+      const base = config(false, 10800, 3600);
+      const record = await h.engine.startStrategy({ ...base, asset: 'TESTTWAP', twapPlan: { ...base.twapPlan, symbol } });
+      now = Date.parse(record.createdAt) + 100;quote();
+      const first = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 1);
+      ackOrder(h.runtime, 'remote-1', 'FILLED', '34', '100');await first;
+      disconnectBrowser();
+      now += 31 * 60_000;
+      internals.dynamicMarkets.set(symbol, Date.now() - 31 * 60_000);
+      await h.engine.tick();
+      internals.evictIdleDynamicMarkets();
+      expect(hub.snapshot().markets.some((market) => market.symbol === symbol)).toBe(true);
+      expect(h.gateway.createdOrders).toHaveLength(1);
+      now += 29 * 60_000;quote();
+      const second = h.engine.tick();await waitFor(() => h.gateway.createdOrders.length === 2);
+      ackOrder(h.runtime, 'remote-2', 'FILLED', '33', '100');await second;
+      expect(h.runtime.getStrategy(record.id)).toMatchObject({ status: 'RUNNING', filledQuantity: '67' });
+      await h.engine.stopStrategy(record.id);
+      internals.dynamicMarkets.set(symbol, 0);internals.evictIdleDynamicMarkets();
+      expect(hub.snapshot().markets.some((market) => market.symbol === symbol)).toBe(false);
+    } finally { disconnectBrowser();hub.stop(); }
+  });
+});
 
 describe('strategy engine', () => {
   it('closes a position in the requested number of timed reduce-only slices', async () => {

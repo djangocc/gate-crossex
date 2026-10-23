@@ -1,4 +1,4 @@
-export type StrategyRouteKind = 'position' | 'auto' | 'premium' | 'boros';
+export type StrategyRouteKind = 'position' | 'auto' | 'premium' | 'boros' | 'twap';
 
 export type FrontendRoute =
   | { workspace: 'Trade' }
@@ -14,6 +14,7 @@ const STRATEGY_PATHS: Record<StrategyRouteKind, string> = {
   auto: '/strategies/price-difference',
   premium: '/strategies/sk-hynix-premium',
   boros: '/strategies/boros',
+  twap: '/strategies/timed-execution',
 };
 
 /** Convert an application page into its canonical, reload-safe browser path. */

@@ -2261,3 +2261,19 @@ html[data-theme='light'] .activity-message button { border-color: #cbd6de; color
 .position-history-details { min-width: 0; margin-top: 16px; border-top: 2px solid var(--line); }
 .position-history-details > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; color: var(--text); font-size: var(--text-small); }
 .position-history-details > header strong { overflow-wrap: anywhere; }
+
+.twap-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.twap-setup, .twap-preview { min-width: 0; border: 1px solid var(--line); border-radius: 8px; }
+.twap-setup { overflow: visible; }
+.twap-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 18px; }
+.twap-fields > label { display: grid; gap: 8px; color: var(--muted); font-size: var(--text-small); }
+.twap-fields > label > input, .twap-fields > label > select { width: 100%; min-width: 0; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--panel); font: inherit; }
+.twap-contract-label .strategy-asset-search { min-width: 0; }
+.twap-contract-label .strategy-asset-search-label { margin-bottom: 8px; }
+.twap-preview .mode-refresh { padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.twap-preview > .start-strategy { width: calc(100% - 36px); margin: 12px 18px; }
+.twap-preview .launch-summary { padding: 18px; }
+.twap-preview dd { overflow-wrap: anywhere; }
+.twap-message { margin: 12px 18px; color: var(--text); font-size: var(--text-small); }
+@media (max-width: 900px) { .twap-layout { grid-template-columns: 1fr; } }
+@media (max-width: 540px) { .twap-fields { grid-template-columns: 1fr; } }

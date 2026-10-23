@@ -282,8 +282,9 @@ export const navItems: { label: NavigationLabel; glyph: string }[] = [
 ];
 
 /** Strategies listed under the nav "Strategy" dropdown; each opens its own dedicated page. */
-export const strategyPages: Array<{ kind: StrategyKind | 'boros'; glyph: string; label: string; detail: string }> = [
+export const strategyPages: Array<{ kind: StrategyKind | 'boros' | 'twap'; glyph: string; label: string; detail: string }> = [
   { kind: 'position', glyph: '◎', label: 'Cross-exchange hedge', detail: 'Execute a fixed two-venue position, then stop' },
+  { kind: 'twap', glyph: '◷', label: 'Timed market execution', detail: 'Split opening or reduce-only orders over time' },
   { kind: 'premium', glyph: '≒', label: 'SK hynix premium bot', detail: 'Trade the SK hynix ADR premium vs the Korean listing' },
 ];
 

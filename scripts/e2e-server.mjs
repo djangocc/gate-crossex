@@ -238,9 +238,10 @@ app.post('/__e2e/trading-mode', async (request) => {
   return { mode };
 });
 
-app.post('/__e2e/fresh-quotes', async () => {
+app.post('/__e2e/fresh-quotes', async (request) => {
   const timestamp = Date.now();
   const quotes = [
+    ...(request.body?.twap ? [{ symbol: 'BINANCE_FUTURE_BTC_USDT', bid: '64000', ask: '64001' }] : []),
     { symbol: 'OKX_FUTURE_ETH_USDT', bid: '3861.9', ask: '3862.1' },
     { symbol: 'HYPERLIQUID_FUTURE_ETH_USDC', bid: '3862.4', ask: '3862.6' },
   ];

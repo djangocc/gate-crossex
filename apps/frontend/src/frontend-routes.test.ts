@@ -8,6 +8,7 @@ describe('frontend routes', () => {
     { workspace: 'Strategy', strategyKind: 'auto' },
     { workspace: 'Strategy', strategyKind: 'premium' },
     { workspace: 'Strategy', strategyKind: 'boros' },
+    { workspace: 'Strategy', strategyKind: 'twap' },
     { workspace: 'Funding Rates', asset: null },
     { workspace: 'Funding Rates', asset: 'BTC' },
     { workspace: 'Portfolio' },
