@@ -12,12 +12,14 @@ export function StrategyLaunchConfirmation({
   market,
   rows,
   busy,
+  error,
   onCancel,
   onConfirm,
 }: {
   market: string;
   rows: StrategyConfirmationRow[];
   busy: boolean;
+  error?: string | null;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -38,6 +40,7 @@ export function StrategyLaunchConfirmation({
       <dl className="confirm-order-summary">
         {rows.map((row, index) => <div key={`${row.label}:${index}`}><dt>{row.label}</dt><dd className={row.tone}>{row.value}</dd></div>)}
       </dl>
+      {error && <p className="strategy-confirm-warning" role="alert">{error}</p>}
       <div className="confirm-order-actions">
         <button className="confirm-back" data-dialog-autofocus onClick={onCancel} disabled={busy}>{t('Go back')}</button>
         <button className="confirm-submit buy" disabled={busy} onClick={onConfirm}>

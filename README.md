@@ -31,6 +31,8 @@ Aster perpetuals use the existing Gate CrossEx credentials and USDT settlement. 
   Direct orders, fund transfers, paired hedges, spread bots, ADR premium strategies, and a Boros fixed-rate workflow.
 - 按资产分组持仓，支持即时或定时分批只减仓平仓。<br>
   Asset-grouped positions with immediate or timed reduce-only closing.
+- 定时拆单：设置合约总数量、时长和间隔，分批市价开仓或仅减仓，支持进度、日志和停止。<br>
+  Timed market execution with total quantity, window, interval, opening/reduce-only intent, progress, logs, and stop controls.
 - 按交易对比较账户手续费，并按各交易所原生结算周期显示和标准化资金费率。<br>
   Account fee comparison by market, plus funding rates displayed and normalized using each venue's native settlement interval.
 - 策略启动和直接下单前验证保证金及杠杆风险档位上限。<br>

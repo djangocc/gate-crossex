@@ -24,6 +24,10 @@ const chineseResultText: Record<string, string> = {
   Stopped: '已停止',
   'submit error': '提交失败',
   'unknown error': '未知错误',
+  'All requested quantity confirmed filled': '目标数量已全部确认成交',
+  'Timed execution has an unresolved order; reconciliation required': '存在未确认的订单，请核对后再继续拆单',
+  'Timed execution exhausted its slices with unfilled quantity': '拆单次数已用完，仍有未成交数量',
+  'Timed execution quantity exceeded its target; review fills': '成交量超过目标，请检查成交记录',
 };
 
 /**
@@ -32,7 +36,7 @@ const chineseResultText: Record<string, string> = {
  */
 export function localizeStrategyLogCondition(condition: string, language: StrategyLogLanguage): string {
   if (language !== 'zh') return condition;
-  return condition.replace(/\bPremium\b/gi, '溢价');
+  return condition.replace(/\bPremium\b/gi, '溢价').replace(/^Slice (\d+)\/(\d+)$/, '第 $1 / $2 批');
 }
 
 export function localizeStrategyLogResult(result: string, language: StrategyLogLanguage): string {
@@ -40,6 +44,10 @@ export function localizeStrategyLogResult(result: string, language: StrategyLogL
 
   let localized = chineseResultText[result] ?? result;
   localized = localized
+    .replace(/^Timed execution expired with (.+) remaining$/i, '拆单时限已过，剩余 $1')
+    .replace(/^Timed execution slice incomplete: (.+); inspect remaining quantity$/i, '本批未完全成交：$1；请检查剩余数量')
+    .replace(/^Timed execution paused: (.+)$/i, '定时拆单已暂停：$1')
+    .replace(/^Average price (.+)$/i, '成交均价 $1')
     .replace(/^Leverage (.+?)× \/ (.+?)× · reserved margin (.+?) of (.+)$/i, '杠杆 $1× / $2× · 预留保证金 $3 / 可用保证金 $4')
     .replace(/^Stopped with unhedged residual (.+); review positions$/i, '已停止，存在未对冲剩余敞口 $1；请检查持仓')
     .replace(/^Hedge quantity (.+) rounds below the (.+) lot size; raise per-order quantity$/i, '对冲数量 $1 按步长取整后低于 $2 的最小下单量；请提高每单数量')

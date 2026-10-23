@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { Decimal } from 'decimal.js';
 import { z } from 'zod';
-import { manualOrderPositionSide, PositionModeResponseSchema, type PositionModeResponse, type LiveBalance, type PortfolioFill, type PortfolioFuturesPosition, type UnresolvedOrder } from '@gate-crossex/shared-types';
+import { manualOrderPositionSide, PositionModeResponseSchema, TwapPlanSchema, type PositionModeResponse, type LiveBalance, type PortfolioFill, type PortfolioFuturesPosition, type UnresolvedOrder } from '@gate-crossex/shared-types';
 import { DEFAULT_CREDENTIAL_PROFILE, type CredentialVault, type GateCredentials } from './credential-vault.js';
 import { CrossExOrderRequestSchema, GateApiError, type GateCrossExAccount, type GateCrossExPosition, type GateCrossExRiskLimit, type ReadOnlyCrossExGateway, type TradingCrossExGateway } from './crossex-client.js';
 import type { PrivateCrossExEvent } from './private-stream.js';
@@ -62,6 +62,7 @@ export const CreateStrategyInputSchema = z.object({
   reduceOnly: z.boolean().default(false),
   executionMethod: z.enum(['TAKER_TAKER', 'MAKER_TAKER']),
   makerLeg: z.enum(['left', 'right']).optional(),
+  twapPlan: TwapPlanSchema.optional(),
   closePlan: z.object({
     orderCount: z.number().int().min(2).max(100),
     intervalSeconds: z.number().int().min(1).max(86_400),
@@ -73,6 +74,16 @@ export const CreateStrategyInputSchema = z.object({
     })).min(1).max(20),
   }).optional(),
 }).superRefine((value, context) => {
+  if (value.twapPlan) {
+    if (value.kind !== 'position' || value.closePlan || value.executionMethod !== 'TAKER_TAKER') {
+      context.addIssue({ code: 'custom', path: ['twapPlan'], message: 'timed execution requires a standalone market plan' });
+    }
+    const plan = value.twapPlan;
+    if (value.leftVenue !== plan.symbol.split('_')[0] || value.leftSide !== plan.side) {
+      context.addIssue({ code: 'custom', path: ['twapPlan'], message: 'timed execution target does not match strategy' });
+    }
+    return;
+  }
   if (value.closePlan) {
     if (value.kind !== 'position') context.addIssue({ code: 'custom', path: ['kind'], message: 'close plans must be position strategies' });
     if (!value.reduceOnly) context.addIssue({ code: 'custom', path: ['reduceOnly'], message: 'close plans must be reduce only' });
@@ -212,7 +223,9 @@ function maxRiskPositionValueAtLeverage(
 
 export interface PlaceOrderMetadata {
   strategyId: string;
-  strategyLeg: 'left' | 'right' | `close-${number}`;
+  strategyLeg: 'left' | 'right' | 'twap' | `close-${number}`;
+  /** Recheck a timed strategy's deadline/stop state after asynchronous preflights. */
+  beforeSubmit?: () => void;
   /** Groups the legs of one clip (and its repairs) so per-clip hedge ratios are recoverable. */
   strategyClip?: string;
   /**
@@ -804,9 +817,9 @@ export class TradingRuntime {
     const strategyRow = metadata ? this.statement("SELECT config_json FROM execution_strategies WHERE id = ? AND environment = 'live'")
       .get(metadata.strategyId) as { config_json: string } | undefined : undefined;
     const strategyConfig = strategyRow ? CreateStrategyInputSchema.parse(JSON.parse(strategyRow.config_json)) : undefined;
-    const sameVenueHedge = strategyConfig?.kind === 'position' && !strategyConfig.closePlan
+    const sameVenueHedge = strategyConfig?.kind === 'position' && !strategyConfig.closePlan && !strategyConfig.twapPlan
       && strategyConfig.leftVenue === strategyConfig.rightVenue;
-    if (!metadata || sameVenueHedge) {
+    if (!metadata || sameVenueHedge || strategyConfig?.twapPlan) {
       ({ positionMode } = await this.readPositionMode(credentials, input.symbol));
       if (sameVenueHedge && positionMode !== 'DUAL') {
         throw new TradingRuntimeError('same_venue_requires_dual_mode', 409);
@@ -852,7 +865,7 @@ export class TradingRuntime {
         }
       }
     }
-    if (!metadata && referencePrice !== undefined && !input.reduceOnly) {
+    if ((!metadata || strategyConfig?.twapPlan) && referencePrice !== undefined && !input.reduceOnly) {
       if (!referencePrice || !decimalText.safeParse(referencePrice).success
         || !tradingGateway.queryPositions || !tradingGateway.queryLeverages) {
         throw new TradingRuntimeError('order_position_limit_unavailable', 503);
@@ -895,6 +908,7 @@ export class TradingRuntime {
     if (!this.session.liveTradingEnabled && !metadata?.riskReducing) {
       throw new TradingRuntimeError('live_trading_locked', 403);
     }
+    metadata?.beforeSubmit?.();
     const clientOrderId = `gct-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const gateInput = CrossExOrderRequestSchema.parse({ text: clientOrderId, symbol: input.symbol, side: input.side,
       type: input.type, time_in_force: input.timeInForce, qty: input.quantity, price: input.price,

@@ -109,6 +109,7 @@ function minimumSizeIssue(
 }
 
 function strategyMaxAmount(config: StrategyConfig): string {
+  if (config.twapPlan) return config.twapPlan.quantity;
   if (config.closePlan) return `${config.closePlan.orderCount} orders`;
   if (config.kind === 'premium' && config.grid) {
     const derived = (Number(config.perOrderQuantity) || 0) * (config.gridLevels ?? 0);
@@ -118,6 +119,7 @@ function strategyMaxAmount(config: StrategyConfig): string {
 }
 
 function strategyMarketLabel(config: StrategyConfig): string {
+  if (config.twapPlan) return config.twapPlan.symbol;
   if (config.closePlan) {
     const assets = [...new Set(config.closePlan.targets.map((target) => symbolParts(target.symbol).asset))];
     return assets.join(' / ');
@@ -311,7 +313,7 @@ export function RunningStrategiesPanel({ strategies, authenticatedPortfolio, tra
   }
 
   function kindLabel(strategy: StrategyRecord): string {
-    return t(strategy.config.closePlan ? 'Hedge position strategy' : strategy.kind === 'auto' ? 'Price-difference bot' : strategy.kind === 'premium' ? 'SK hynix premium bot' : 'Cross-exchange hedge');
+    return t(strategy.config.twapPlan ? 'Timed market execution' : strategy.config.closePlan ? 'Hedge position strategy' : strategy.kind === 'auto' ? 'Price-difference bot' : strategy.kind === 'premium' ? 'SK hynix premium bot' : 'Cross-exchange hedge');
   }
 
   return <>
@@ -332,6 +334,7 @@ export function RunningStrategiesPanel({ strategies, authenticatedPortfolio, tra
       const config = strategy.config;
       const premium = config.kind === 'premium';
       const timedClose = Boolean(config.closePlan);
+      const twap = config.twapPlan;
       const shortPremium = config.leftSide === 'SELL';
       const leftVenue = exchanges.find((item) => item.id === config.leftVenue.toLowerCase());
       const rightVenue = exchanges.find((item) => item.id === config.rightVenue.toLowerCase());
@@ -341,7 +344,9 @@ export function RunningStrategiesPanel({ strategies, authenticatedPortfolio, tra
         <span><strong>{strategy.id}</strong><small>{kindLabel(strategy)}{strategy.accountLabel ? ` · ${strategy.accountLabel}` : ''}</small></span>
         <span><strong>{strategyMarketLabel(config)}</strong><small>{t(premium ? 'ADR premium' : 'Perpetual')}</small></span>
         <span>{timedClose ? [...new Set(config.closePlan?.targets.map((target) => symbolParts(target.symbol).venue) ?? [])].join(' ⇄ ') : config.leftVenue === config.rightVenue ? leftVenue?.name ?? config.leftVenue : `${leftVenue?.name ?? config.leftVenue} ⇄ ${rightVenue?.name ?? config.rightVenue}`}</span>
-        <span>{timedClose
+        <span>{twap
+          ? <><strong>{t(config.reduceOnly ? 'Reduce only' : 'Ordinary order')} · {t(twap.side === 'BUY' ? 'Buy' : 'Sell')}</strong><small>{twap.durationSeconds}s / {twap.intervalSeconds}s</small></>
+          : timedClose
           ? <><strong>{config.closePlan?.orderCount} {t('orders')}</strong><small>{config.closePlan?.intervalSeconds}s {t('Time gap between orders').toLowerCase()}</small></>
           : premium
           ? <><strong>{shortPremium ? '≥' : '≤'} {config.entryPremiumPct}%</strong>{config.reduceOnly
@@ -356,12 +361,12 @@ export function RunningStrategiesPanel({ strategies, authenticatedPortfolio, tra
               : <small className="take-profit-value"><span>{shortPremium ? '≤' : '≥'} {config.takeProfitPremiumPct}%</span>{strategy.status === 'RUNNING' && <button className="edit-take-profit" onClick={() => editTakeProfit(strategy)}>{t('Edit take profit')}</button>}</small>}</>
           : <><strong>≥ {config.entryBps} bps</strong><small>{config.takeProfitBps ? `≤ ${config.takeProfitBps} bps` : t('Stop at full fill')}</small></>}</span>
         {showingHistory && <span className={`strategy-realized-pnl ${Number(strategy.realizedPnl) >= 0 ? 'positive' : 'negative'}`}><strong>{Number(strategy.realizedPnl) >= 0 ? '+' : ''}{Number(strategy.realizedPnl).toFixed(2)}</strong><small>USDT</small></span>}
-        <span>{timedClose ? `${config.closePlan?.targets.length} ${t('Positions')} · ${config.closePlan?.orderCount} ${t('orders')}` : `${config.perOrderQuantity} ${config.asset} · ${t('max')} ${strategyMaxAmount(config)}`}</span>
-        <span>{config.executionMethod.replaceAll('_', '–')}</span>
+        <span>{twap ? `${strategy.filledQuantity} / ${twap.quantity} ${config.asset}` : timedClose ? `${config.closePlan?.targets.length} ${t('Positions')} · ${config.closePlan?.orderCount} ${t('orders')}` : `${config.perOrderQuantity} ${config.asset} · ${t('max')} ${strategyMaxAmount(config)}`}</span>
+        <span>{twap ? t('Market') : config.executionMethod.replaceAll('_', '–')}</span>
         <span><button className="logs-button" onClick={() => void openLogs(strategy.id)}>{t('View logs')}</button></span>
         <span>{strategyRuntime(strategy, showingHistory)}</span>
         <span className={`strategy-status ${strategy.status.toLowerCase()}`}><i />{strategy.status}<small>{strategy.progress.toFixed(0)}%</small></span>
-        {!showingHistory && <span className="strategy-actions">{strategy.status === 'PAUSED' && <button className="resume-button" onClick={() => void resumeStrategy(strategy.id)} disabled={resumingIds.includes(strategy.id) || stoppingIds.includes(strategy.id)}>{resumingIds.includes(strategy.id) ? t('Resuming…') : t('Resume')}</button>}<button className="stop-button" onClick={() => void stopStrategy(strategy.id)} disabled={stoppingIds.includes(strategy.id) || resumingIds.includes(strategy.id)}>{stoppingIds.includes(strategy.id) ? t('Stopping…') : t('Stop')}</button></span>}
+        {!showingHistory && <span className="strategy-actions">{strategy.status === 'PAUSED' && (!twap || Date.now() < Date.parse(strategy.createdAt) + twap.durationSeconds * 1000) && <button className="resume-button" onClick={() => void resumeStrategy(strategy.id)} disabled={resumingIds.includes(strategy.id) || stoppingIds.includes(strategy.id)}>{resumingIds.includes(strategy.id) ? t('Resuming…') : t('Resume')}</button>}<button className="stop-button" onClick={() => void stopStrategy(strategy.id)} disabled={stoppingIds.includes(strategy.id) || resumingIds.includes(strategy.id)}>{stoppingIds.includes(strategy.id) ? t('Stopping…') : t('Stop')}</button></span>}
       </div>;
     })}</div>{showingHistory && historicalStrategies.length >= HISTORICAL_STRATEGIES_PAGE_SIZE && <div className="funding-pagination strategy-pagination"><span className="page-range">{historyStart + 1}–{Math.min(historyStart + HISTORICAL_STRATEGIES_PAGE_SIZE, historicalStrategies.length)} / {historicalStrategies.length}</span><div className="page-controls"><button onClick={() => setHistoryPage((current) => Math.max(1, current - 1))} disabled={historyPage === 1}>{t('Prev')}</button><span className="page-indicator">{t('Page')} {historyPage} / {historyPages}</span><button onClick={() => setHistoryPage((current) => Math.min(historyPages, current + 1))} disabled={historyPage === historyPages}>{t('Next')}</button></div><span className="page-size">10 {t('per page')}</span></div>}{stopNotice && <div className="launch-notice error panel-notice">{stopNotice}</div>}{visibleStrategies.length === 0 && <div className="no-strategies"><span>◎</span><strong>{t(showingHistory ? 'No historical strategies' : 'No strategies running')}</strong><small>{t(showingHistory ? 'Stopped and completed strategies will appear here.' : 'Configure a strategy above and start it when ready.')}</small></div>}
       </>}
@@ -379,7 +384,7 @@ export function RunningStrategiesPanel({ strategies, authenticatedPortfolio, tra
     {selectedLogStrategy && <div className="execution-log-backdrop" role="presentation" onMouseDown={() => setSelectedLogStrategyId(null)}>
       <section ref={logDialogRef} tabIndex={-1} className="execution-log-modal" role="dialog" aria-modal="true" aria-labelledby="execution-log-title" onMouseDown={(event) => event.stopPropagation()}>
         <header><div><p className="eyebrow">{t('Strategy execution log')}</p><h2 id="execution-log-title">{selectedLogStrategy.id}</h2><span>{strategyMarketLabel(selectedLogStrategy.config)} · {selectedLogStrategy.config.closePlan ? [...new Set(selectedLogStrategy.config.closePlan.targets.map((target) => symbolParts(target.symbol).venue))].join(' ⇄ ') : selectedLogStrategy.config.leftVenue === selectedLogStrategy.config.rightVenue ? selectedLogStrategy.config.leftVenue : `${selectedLogStrategy.config.leftVenue} ⇄ ${selectedLogStrategy.config.rightVenue}`}</span></div><button data-dialog-autofocus aria-label={t('Close execution log')} onClick={() => setSelectedLogStrategyId(null)}>×</button></header>
-        <div className="execution-log-summary"><div><span>{t('Strategy')}</span><strong>{t(selectedLogStrategy.config.closePlan ? 'Hedge position strategy' : selectedLogStrategy.kind === 'auto' ? 'Auto price difference' : selectedLogStrategy.kind === 'premium' ? 'SK hynix premium bot' : 'Cross-exchange hedge')}</strong></div><div><span>{t('Status')}</span><strong className="positive">● {selectedLogStrategy.status}</strong></div><div><span>{t('Execution method')}</span><strong>{selectedLogStrategy.config.executionMethod.replaceAll('_', '–')}</strong></div></div>
+        <div className="execution-log-summary"><div><span>{t('Strategy')}</span><strong>{t(selectedLogStrategy.config.twapPlan ? 'Timed market execution' : selectedLogStrategy.config.closePlan ? 'Hedge position strategy' : selectedLogStrategy.kind === 'auto' ? 'Auto price difference' : selectedLogStrategy.kind === 'premium' ? 'SK hynix premium bot' : 'Cross-exchange hedge')}</strong></div><div><span>{t('Status')}</span><strong className="positive">● {selectedLogStrategy.status}</strong></div><div><span>{t('Execution method')}</span><strong>{selectedLogStrategy.config.executionMethod.replaceAll('_', '–')}</strong></div></div>
         <div className="execution-log-table">
           <div className="execution-log-head"><span>{t('Time')}</span><span>{t('Event')}</span><span>{t('Spread / trigger')}</span><span>{t('Quantity')}</span><span>{t('Execution result')}</span><span>{t('Result')}</span></div>
           {logLoadState.status === 'loading' && <div className="execution-log-state">{t('Loading execution log…')}</div>}

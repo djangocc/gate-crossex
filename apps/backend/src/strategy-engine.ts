@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { Decimal } from 'decimal.js';
-import { manualOrderPositionSide } from '@gate-crossex/shared-types';
+import { manualOrderPositionSide, twapSlices } from '@gate-crossex/shared-types';
 import type { LiveMarket } from './market-hub.js';
 import type { TradingSession } from './trading-session.js';
 import { GateApiError } from './crossex-client.js';
@@ -121,7 +121,7 @@ function legsOf(config: CreateStrategyInput): { left: LegDefinition; right: LegD
 }
 
 function sameVenueMaker(config: CreateStrategyInput): boolean {
-  return config.kind === 'position' && !config.closePlan
+  return config.kind === 'position' && !config.closePlan && !config.twapPlan
     && config.leftVenue === config.rightVenue && config.executionMethod === 'MAKER_TAKER';
 }
 
@@ -257,6 +257,7 @@ export class StrategyEngine {
   private readonly instrumentConstraintsStatement;
   private readonly latestLegOrderStatement;
   private stopped = false;
+  private readonly twapRequests = new Map<string, { signature: string; result: Promise<StrategyRecord> }>();
 
   constructor(
     private readonly database: Database.Database,
@@ -430,6 +431,31 @@ export class StrategyEngine {
     raw: unknown,
     account: { profileId: string; label: string } | null = null,
   ): Promise<StrategyRecord> {
+    const config = CreateStrategyInputSchema.parse(raw);
+    if (!config.twapPlan) return this.startStrategyOnce(config, account);
+    const key = `${account?.profileId ?? ''}:${config.twapPlan.requestId}`;
+    const signature = JSON.stringify({ plan: config.twapPlan, reduceOnly: config.reduceOnly, leverage: config.leftLeverage });
+    const pending = this.twapRequests.get(key);
+    if (pending) {
+      if (pending.signature !== signature) throw new StrategyEngineError('twap_request_conflict', 409);
+      return pending.result;
+    }
+    const prior = this.runtime.listStrategies().find((record) => record.accountProfileId === (account?.profileId ?? null)
+      && record.config.twapPlan?.requestId === config.twapPlan!.requestId);
+    if (prior) {
+      const priorSignature = JSON.stringify({ plan: prior.config.twapPlan, reduceOnly: prior.config.reduceOnly, leverage: prior.config.leftLeverage });
+      if (priorSignature !== signature) throw new StrategyEngineError('twap_request_conflict', 409);
+      return prior;
+    }
+    const result = this.startStrategyOnce(config, account);
+    this.twapRequests.set(key, { signature, result });
+    try { return await result; } finally { this.twapRequests.delete(key); }
+  }
+
+  private async startStrategyOnce(
+    raw: unknown,
+    account: { profileId: string; label: string } | null,
+  ): Promise<StrategyRecord> {
     const input = CreateStrategyInputSchema.parse(raw);
     // Grid strategies remain readable/resumable for historical compatibility, but the product no
     // longer allows creating new premium grids.
@@ -451,7 +477,9 @@ export class StrategyEngine {
     const running = this.runtime.listStrategies().filter((strategy) => strategy.status === 'RUNNING');
     if (running.length >= 10) throw new StrategyEngineError('too_many_running_strategies', 409);
     let marginPreflight = { requiredMargin: '0', availableMargin: '0' };
-    if (input.closePlan) {
+    if (input.twapPlan) {
+      marginPreflight = await this.prepareTwap(input);
+    } else if (input.closePlan) {
       for (const target of input.closePlan.targets) {
         if (!this.markets.market(target.symbol) && !this.markets.ensureMarket?.(target.symbol)) {
           throw new StrategyEngineError('unknown_strategy_market', 400);
@@ -477,7 +505,7 @@ export class StrategyEngine {
       this.validateStrategyOrderSizes(input, legs);
       marginPreflight = await this.prepareStrategy(input, legs);
     }
-    const prefix = input.closePlan ? 'CLOSE' : input.kind === 'auto' ? 'AUTO' : input.kind === 'premium' ? 'PREM' : 'PAIR';
+    const prefix = input.twapPlan ? 'TWAP' : input.closePlan ? 'CLOSE' : input.kind === 'auto' ? 'AUTO' : input.kind === 'premium' ? 'PREM' : 'PAIR';
     const id = `${prefix}-${randomUUID().replaceAll('-', '').slice(0, 8).toUpperCase()}`;
     const now = new Date().toISOString();
     this.database.prepare(`INSERT INTO execution_strategies (id, kind, environment, status, config_json, progress,
@@ -487,7 +515,9 @@ export class StrategyEngine {
       .run(id, input.kind, JSON.stringify(input), account?.profileId ?? null, account?.label ?? null, now, now);
     const shortPremium = input.leftSide === 'SELL';
     const hedgeModeLabel = input.hedgeMode === 'EQUAL_NOTIONAL' ? 'equal-notional hedge' : 'share-ratio hedge';
-    const startCondition = input.closePlan
+    const startCondition = input.twapPlan
+      ? `${input.twapPlan.quantity} ${input.asset} within ${input.twapPlan.durationSeconds}s · ${input.twapPlan.intervalSeconds}s interval`
+      : input.closePlan
       ? `${input.closePlan.orderCount} reduce-only slices · ${input.closePlan.intervalSeconds}s interval`
       : input.kind === 'premium'
       ? input.grid
@@ -500,7 +530,9 @@ export class StrategyEngine {
         : `Enter ≥ ${input.entryBps} bps`;
     this.runtime.addStrategyLog(id, 'info', 'Strategy started', startCondition,
       input.closePlan ? `${input.closePlan.targets.length} position${input.closePlan.targets.length === 1 ? '' : 's'}` : `${input.perOrderQuantity} ${input.asset}`,
-      input.closePlan
+      input.twapPlan
+        ? `Timed market execution · ${input.reduceOnly ? 'reduce only' : 'ordinary order'} · position mode verified`
+        : input.closePlan
         ? 'Timed reduce-only close · existing positions validated before scheduling'
         : input.reduceOnly
         ? 'Reduce-only mode · existing positions validated on both legs'
@@ -558,7 +590,12 @@ export class StrategyEngine {
     }
 
     const config = record.config;
-    if (config.closePlan) {
+    if (config.twapPlan) {
+      if (this.options.now() >= Date.parse(record.createdAt) + config.twapPlan.durationSeconds * 1000) {
+        throw new StrategyEngineError('twap_time_expired', 409);
+      }
+      await this.prepareTwap(config, this.twapExecuted(id));
+    } else if (config.closePlan) {
       for (const target of config.closePlan.targets) {
         if (!this.markets.market(target.symbol) && !this.markets.ensureMarket?.(target.symbol)) {
           throw new StrategyEngineError('unknown_strategy_market', 400);
@@ -1052,6 +1089,148 @@ export class StrategyEngine {
     }
   }
 
+  private twapExecuted(id: string): Decimal {
+    this.invalidateLedger(id);
+    return this.strategyLedger(id).rows.filter((row) => row.leg === 'twap')
+      .reduce((sum, row) => sum.plus(row.executed_quantity || '0'), ZERO);
+  }
+
+  private twapQuantities(config: CreateStrategyInput): Decimal[] {
+    const plan = config.twapPlan;
+    if (!plan) return [];
+    const lot = this.constraintsFor(plan.symbol).lotSize;
+    if (!lot) throw new StrategyEngineError('strategy_instrument_constraints_unavailable', 409);
+    try {
+      return twapSlices(plan.quantity, lot, plan.durationSeconds, plan.intervalSeconds).map((quantity) => new Decimal(quantity));
+    } catch (error) {
+      throw new StrategyEngineError(error instanceof Error ? error.message : 'twap_invalid_quantity', 400);
+    }
+  }
+
+  private twapSizeError(symbol: string, side: 'BUY' | 'SELL', quantity: Decimal): StrategyEngineError | null {
+    const error = this.marketOrderSizeError(symbol, side, quantity);
+    if (error) return error;
+    const row = this.database.prepare('SELECT max_market_size FROM crossex_instruments WHERE symbol = ?').get(symbol) as { max_market_size: string | null } | undefined;
+    if (row?.max_market_size && new Decimal(row.max_market_size).gt(0) && quantity.gt(row.max_market_size)) {
+      return new StrategyEngineError('twap_slice_above_maximum_size', 400, symbol);
+    }
+    return null;
+  }
+
+  private async prepareTwap(config: CreateStrategyInput, alreadyFilled = ZERO): Promise<{ requiredMargin: string; availableMargin: string }> {
+    const plan = config.twapPlan!;
+    if (!this.markets.market(plan.symbol) && !this.markets.ensureMarket?.(plan.symbol)) {
+      throw new StrategyEngineError('unknown_strategy_market', 400);
+    }
+    const price = this.executablePrice(plan.symbol, plan.side);
+    if (!price) throw new StrategyEngineError('strategy_market_data_unavailable', 409);
+    const row = this.database.prepare('SELECT delist_time FROM crossex_instruments WHERE symbol = ?').get(plan.symbol) as { delist_time: string } | undefined;
+    const delistTime = Number(row?.delist_time ?? 0);
+    const delistMs = delistTime > 0 && delistTime < 100_000_000_000 ? delistTime * 1000 : delistTime;
+    if (delistMs > 0 && delistMs <= this.options.now() + plan.durationSeconds * 1000) {
+      throw new StrategyEngineError('twap_market_delists_before_deadline', 409);
+    }
+    const quantities = this.twapQuantities(config);
+    for (const quantity of [quantities[0]!, quantities.at(-1)!]) {
+      const error = this.twapSizeError(plan.symbol, plan.side, quantity);
+      if (error) throw error;
+    }
+    const mode = await this.runtime.queryPositionMode(plan.symbol);
+    if (mode.positionMode !== plan.expectedPositionMode) throw new StrategyEngineError('order_position_mode_changed', 409);
+    if (manualOrderPositionSide(mode.positionMode, plan.side, config.reduceOnly) !== plan.positionSide) {
+      throw new StrategyEngineError('order_position_side_mismatch', 409);
+    }
+    const remaining = Decimal.max(ZERO, new Decimal(plan.quantity).minus(alreadyFilled));
+    if (remaining.isZero()) return { requiredMargin: '0', availableMargin: '0' };
+    const legs = [{ symbol: plan.symbol, venue: plan.symbol.split('_')[0]!, side: plan.side,
+      positionSide: plan.positionSide, leverage: config.leftLeverage, estimatedQuantity: remaining.toString(), estimatedPrice: price.toString() }];
+    if (config.reduceOnly) {
+      await this.runtime.prepareReduceOnlyStrategy(legs);
+      return { requiredMargin: '0', availableMargin: '0' };
+    }
+    return this.runtime.prepareStrategyMargin(legs);
+  }
+
+  private persistTwap(actor: StrategyActor): Decimal {
+    const executed = this.twapExecuted(actor.id);
+    const target = new Decimal(actor.config.twapPlan!.quantity);
+    const current = this.runtime.getStrategy(actor.id);
+    if (!executed.eq(current.filledQuantity)) {
+      this.database.prepare(`UPDATE execution_strategies SET filled_quantity = ?, filled_left = ?, progress = ?, updated_at = ? WHERE id = ?`)
+        .run(executed.toString(), executed.toString(), Decimal.min(100, executed.div(target).mul(100)).toNumber(), new Date().toISOString(), actor.id);
+      this.runtime.emitStrategyUpdate(this.runtime.getStrategy(actor.id));
+    }
+    return executed;
+  }
+
+  private async evaluateTwap(actor: StrategyActor): Promise<void> {
+    const plan = actor.config.twapPlan!;
+    const executed = this.persistTwap(actor);
+    // Never submit another slice while a prior submission can still execute remotely.
+    if (this.openStrategyOrders(actor.id, new Set()).length > 0) {
+      await this.pause(actor, 'Timed execution has an unresolved order; reconciliation required');
+      return;
+    }
+    if (executed.eq(plan.quantity)) {
+      actor.status = 'COMPLETED';
+      const now = new Date().toISOString();
+      this.database.prepare("UPDATE execution_strategies SET status = 'COMPLETED', progress = 100, stopped_at = ?, updated_at = ? WHERE id = ?").run(now, now, actor.id);
+      this.runtime.addStrategyLog(actor.id, 'info', 'Timed execution completed', `${plan.quantity} ${actor.config.asset}`, executed.toString(), 'All requested quantity confirmed filled');
+      this.actors.delete(actor.id);
+      this.runtime.emitStrategyUpdate(this.runtime.getStrategy(actor.id));
+      return;
+    }
+    if (executed.gt(plan.quantity)) { await this.pause(actor, 'Timed execution quantity exceeded its target; review fills'); return; }
+    const deadline = actor.createdAt + plan.durationSeconds * 1000;
+    if (this.options.now() >= deadline) { await this.pause(actor, `Timed execution expired with ${new Decimal(plan.quantity).minus(executed)} ${actor.config.asset} remaining`); return; }
+    // Refresh the market lease even between distant slices. Browser quote watchers disappear
+    // when the page closes; an active server-side task must keep its own ticker available.
+    if (!this.markets.market(plan.symbol) && !this.markets.ensureMarket?.(plan.symbol)) {
+      await this.pause(actor, 'Timed execution market is unavailable');
+      return;
+    }
+    const clips = new Set(this.strategyLedger(actor.id).rows.filter((row) => row.leg === 'twap').map((row) => row.strategy_clip));
+    const index = clips.size;
+    const quantities = this.twapQuantities(actor.config);
+    if (index >= quantities.length) { await this.pause(actor, 'Timed execution exhausted its slices with unfilled quantity'); return; }
+    const dueAt = index === 0 ? actor.createdAt : Math.max(actor.createdAt + index * plan.intervalSeconds * 1000, actor.lastCloseAt + plan.intervalSeconds * 1000);
+    if (this.options.now() < dueAt) return;
+    const price = this.executablePrice(plan.symbol, plan.side);
+    if (!price) return; // No catch-up burst; wait for a fresh quote or the deadline.
+    const cumulative = quantities.slice(0, index + 1).reduce((sum, quantity) => sum.plus(quantity), ZERO);
+    const quantity = Decimal.min(new Decimal(plan.quantity).minus(executed), cumulative.minus(executed));
+    const error = this.twapSizeError(plan.symbol, plan.side, quantity);
+    if (error) { await this.pause(actor, `${error.code}: ${error.message}`); return; }
+    actor.busy = true;
+    try {
+      actor.lastCloseAt = this.options.now();
+      this.runtime.addStrategyLog(actor.id, 'info', 'Timed execution slice triggered', `Slice ${index + 1}/${quantities.length}`, quantity.toString(), `${plan.side} ${plan.symbol} · market · ${actor.config.reduceOnly ? 'reduce only' : 'ordinary'}`);
+      const order = await this.runtime.createOrder({ symbol: plan.symbol, side: plan.side,
+        type: 'MARKET', timeInForce: 'IOC', quantity: quantity.toString(), reduceOnly: actor.config.reduceOnly,
+        positionSide: plan.positionSide, expectedPositionMode: plan.expectedPositionMode,
+      }, { strategyId: actor.id, strategyLeg: 'twap', strategyClip: `twap-${index}`,
+        beforeSubmit: () => {
+          if (actor.suspended || !this.actors.has(actor.id)) throw new StrategyEngineError('twap_stopped', 409);
+          if (this.options.now() >= deadline) throw new StrategyEngineError('twap_time_expired', 409);
+          actor.lastCloseAt = this.options.now();
+        },
+      }, price.toString());
+      const settled = await this.runtime.awaitTerminalOrder(order.id, this.options.orderTimeoutMs);
+      this.persistTwap(actor);
+      if (settled.state !== 'FILLED') {
+        await this.pause(actor, `Timed execution slice incomplete: ${settled.state}; inspect remaining quantity`);
+        return;
+      }
+      this.runtime.addStrategyLog(actor.id, 'info', 'Timed execution slice filled', `Slice ${index + 1}/${quantities.length}`, settled.executedQuantity, `Average price ${settled.executedAveragePrice ?? '—'}`);
+    } catch (cause) {
+      this.persistTwap(actor);
+      await this.pause(actor, `Timed execution paused: ${cause instanceof Error ? cause.message.slice(0, 180) : 'submission failed'}`);
+      return;
+    } finally { actor.busy = false; }
+    // Complete immediately after the final acknowledgement without placing another order.
+    if (this.twapExecuted(actor.id).eq(plan.quantity) && !actor.suspended) await this.evaluateTwap(actor);
+  }
+
   private closePlanSlices(config: CreateStrategyInput, targetIndex: number): Decimal[] {
     const plan = config.closePlan;
     if (!plan) return [];
@@ -1221,6 +1400,7 @@ export class StrategyEngine {
 
   private async afterExecutionChange(actor: StrategyActor): Promise<void> {
     if (!this.actors.has(actor.id)) return;
+    if (actor.config.twapPlan) { this.persistTwap(actor); return; }
     if (actor.config.closePlan) return;
     const exposure = this.legExposures(actor.id, actor.config);
     this.persist(actor, exposure);
@@ -1234,7 +1414,7 @@ export class StrategyEngine {
   }
 
   private async checkCompletion(actor: StrategyActor): Promise<void> {
-    if (actor.status !== 'RUNNING') return;
+    if (actor.status !== 'RUNNING' || actor.config.twapPlan) return;
     if (actor.config.closePlan) return;
     const exposure = this.legExposures(actor.id, actor.config);
     const matched = this.matchedQuantity(exposure);
@@ -1283,8 +1463,10 @@ export class StrategyEngine {
 
   private async pause(actor: StrategyActor, reason: string): Promise<void> {
     actor.suspended = true;
-    actor.quiesceTarget = 'PAUSED';
-    actor.quiesceReason = reason;
+    if (actor.quiesceTarget !== 'STOPPED') {
+      actor.quiesceTarget = 'PAUSED';
+      actor.quiesceReason = reason;
+    }
     await this.finishQuiesce(actor);
   }
 
@@ -1316,6 +1498,11 @@ export class StrategyEngine {
 
   private async maintainQuiesce(actor: StrategyActor): Promise<void> {
     if (!this.actors.has(actor.id)) return;
+    if (actor.config.twapPlan) {
+      this.persistTwap(actor);
+      await this.finishQuiesce(actor);
+      return;
+    }
     const exposure = this.legExposures(actor.id, actor.config);
     this.persist(actor, exposure);
     await this.reconcileExposure(actor, exposure);
@@ -1345,11 +1532,12 @@ export class StrategyEngine {
     actor.quotes.clear();
     actor.status = target;
     const now = new Date().toISOString();
+    if (actor.config.twapPlan) this.persistTwap(actor);
     if (target === 'STOPPED') {
       this.database.prepare("UPDATE execution_strategies SET status = 'STOPPED', stopped_at = ?, updated_at = ? WHERE id = ?")
         .run(now, now, actor.id);
       const exposure = this.legExposures(actor.id, actor.config);
-      const residual = this.hedgeImbalance(actor.id, actor.config, exposure);
+      const residual = actor.config.twapPlan ? ZERO : this.hedgeImbalance(actor.id, actor.config, exposure);
       this.runtime.addStrategyLog(actor.id, residual.gt(QUANTITY_EPSILON) ? 'warning' : 'info', 'Strategy stopped',
         actor.quiesceReason ?? 'Manual stop', '—', residual.gt(QUANTITY_EPSILON)
           ? `Stopped with unhedged residual ${residual.toString()} ${actor.config.asset}; review positions`
@@ -1422,6 +1610,10 @@ export class StrategyEngine {
 
   private async evaluate(actor: StrategyActor): Promise<void> {
     if (!this.actors.has(actor.id) || actor.status !== 'RUNNING' || actor.busy) return;
+    if (actor.config.twapPlan) {
+      await this.evaluateTwap(actor);
+      return;
+    }
     if (actor.config.closePlan) {
       await this.evaluateClosePlan(actor);
       return;

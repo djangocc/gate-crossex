@@ -124,7 +124,7 @@ const BOROS_STRATEGIES_CACHE_MS = 30_000;
 const CATALOG_VENUES = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER', 'ASTER'] as const;
 const QUOTE_PREFERENCE = ['USDT', 'USDC', 'USD'] as const;
 const CROSSEX_FUTURE_SYMBOL = /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_([A-Z0-9]+)_(USDT|USDC|USD)$/;
-const STRATEGY_ID = /^(AUTO|PAIR|PREM|CLOSE)-[A-Z0-9]{8}$/;
+const STRATEGY_ID = /^(AUTO|PAIR|PREM|CLOSE|TWAP)-[A-Z0-9]{8}$/;
 const FundingHistoryRequestSchema = z.object({
   symbols: z.array(z.string().regex(CROSSEX_FUTURE_SYMBOL)).min(1).max(50),
   durationDays: z.union([z.literal(1), z.literal(7), z.literal(30)]).default(30),
@@ -907,6 +907,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     app.get('/strategies/price-difference', sendFrontend);
     app.get('/strategies/sk-hynix-premium', sendFrontend);
     app.get('/strategies/boros', sendFrontend);
+    app.get('/strategies/timed-execution', sendFrontend);
   }
 
   const candleStore = new CandleStore(database, marketHub, publicMarketGateway, {
