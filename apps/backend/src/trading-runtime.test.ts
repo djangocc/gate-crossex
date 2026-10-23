@@ -284,6 +284,19 @@ function positionFixture(positionSide: string, quantity: string): GateCrossExPor
 
 describe('manual position mode and close preflight', () => {
   it.each([
+    ['BUY', false, 'LONG'], ['SELL', false, 'SHORT'],
+    ['BUY', true, 'SHORT'], ['SELL', true, 'LONG'],
+  ] as const)('routes Aster dual %s reduceOnly=%s through CrossEx with the matching leg', async (side, reduceOnly, positionSide) => {
+    const { runtime, gateway } = await createHarness();
+    gateway.account.position_mode = 'DUAL';
+    const symbol = 'ASTER_FUTURE_BTC_USDT';
+    gateway.positions = ['LONG', 'SHORT'].map((leg) => ({ ...positionFixture(leg, '1'), symbol }));
+    const order = await runtime.createOrder({ ...marketOrderInput, symbol, side, reduceOnly, expectedPositionMode: 'DUAL' });
+    expect(order.venue).toBe('ASTER');
+    expect(gateway.createRequests).toEqual([expect.objectContaining({ symbol, side, position_side: positionSide, reduce_only: String(reduceOnly) })]);
+  });
+
+  it.each([
     ['SINGLE', 'BUY', false, 'NONE'], ['SINGLE', 'SELL', false, 'NONE'],
     ['SINGLE', 'BUY', true, 'NONE'], ['SINGLE', 'SELL', true, 'NONE'],
     ['DUAL', 'BUY', false, 'LONG'], ['DUAL', 'SELL', false, 'SHORT'],

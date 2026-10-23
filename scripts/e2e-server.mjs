@@ -10,7 +10,7 @@ import { TradingSession } from '../apps/backend/dist/trading-session.js';
 
 const PORT = 17_942;
 const assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'SUI', 'PEPE', 'AAVE', 'LINK', 'ARB', 'HYPE'];
-const venues = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER'];
+const venues = ['GATE', 'BINANCE', 'OKX', 'BYBIT', 'KRAKEN', 'HYPERLIQUID', 'DERIBIT', 'LIGHTER', 'ASTER'];
 const dataDir = mkdtempSync(join(tmpdir(), 'gate-crossex-e2e-'));
 const config = loadConfig({
   ...process.env,

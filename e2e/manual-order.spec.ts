@@ -84,3 +84,36 @@ test('blocks an unknown mode and refreshes a changed mode without resubmitting',
   await expect(panel.locator('.trade-side-tabs').getByRole('button', { name: 'Buy / Long', exact: true })).toBeVisible();
   expect(submissions).toBe(1);
 });
+
+test('selects Aster and reviews a dual order with its own symbol and position mode', async ({ page }) => {
+  const symbol = 'ASTER_FUTURE_BTC_USDT';
+  const requests: Array<Record<string, unknown>> = [];
+  await page.route('**/api/trading/position-mode/*', (route) => route.fulfill({ json: {
+    symbol: decodeURIComponent(route.request().url().split('/').at(-1) ?? ''),
+    positionMode: 'DUAL', accountMode: 'CROSS_EXCHANGE', exchangeType: 'CROSSEX',
+  } }));
+  await page.route('**/api/trading/orders', async (route) => {
+    const body = route.request().postDataJSON();
+    requests.push(body);
+    await route.fulfill({ json: {
+      id: 'aster-simulated-order', remoteOrderId: null, clientOrderId: 'e2e-aster', ...body,
+      price: body.price ?? null, state: 'NEW', executedQuantity: '0', executedAveragePrice: null,
+      strategyId: null, strategyLeg: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Execution venue: Gate.io' }).click();
+  await page.getByRole('menu', { name: 'Execution venue' }).getByRole('menuitemradio', { name: /Aster/ }).click();
+  await expect(page.getByRole('button', { name: 'Execution venue: Aster' })).toBeVisible();
+  const panel = page.locator('.order-panel');
+  await expect(panel.getByRole('button', { name: 'Refresh position mode' })).toHaveText('Dual position mode');
+  await panel.locator('label.trade-input').filter({ hasText: /^Price/ }).locator('input').fill('64000');
+  await panel.locator('label.trade-input').filter({ hasText: /^Amount/ }).locator('input').fill('0.001');
+  await panel.locator('.submit-order').click();
+  const confirmation = page.getByRole('dialog', { name: 'Confirm order' });
+  await expect(confirmation).toContainText('BTCUSDT perpetual · Aster');
+  await expect(confirmation).toContainText('Open long');
+  await confirmation.locator('.confirm-submit').click();
+  await expect(confirmation).toBeHidden();
+  expect(requests).toEqual([expect.objectContaining({ symbol, side: 'BUY', expectedPositionMode: 'DUAL', reduceOnly: false })]);
+});

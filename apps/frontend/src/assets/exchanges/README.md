@@ -29,3 +29,5 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 All exchange names and retained logos remain trademarks of their respective owners.
+
+- `aster.svg`: an original A monogram for this project, not Aster's trademark logo.

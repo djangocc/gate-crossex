@@ -1,4 +1,4 @@
-const FAVORITE_SYMBOL = /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/;
+const FAVORITE_SYMBOL = /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_[A-Z0-9]+_(USDT|USDC|USD)$/;
 
 /**
  * Browser storage is user-editable and can outlive older application versions. Treat it as

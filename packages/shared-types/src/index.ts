@@ -1,7 +1,7 @@
 import { z } from 'zod';
 export const EnvironmentSchema = z.enum(['testnet','live']);
 export type Environment = z.infer<typeof EnvironmentSchema>;
-export const VenueSchema = z.enum(['GATE','BINANCE','OKX','BYBIT']);
+export const VenueSchema = z.enum(['GATE','BINANCE','OKX','BYBIT','KRAKEN','HYPERLIQUID','DERIBIT','LIGHTER','ASTER']);
 export type Venue = z.infer<typeof VenueSchema>;
 export const ProductTypeSchema = z.enum(['spot','cross_margin','usdt_perp']);
 export type ProductType = z.infer<typeof ProductTypeSchema>;

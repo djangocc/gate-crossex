@@ -798,16 +798,17 @@ describe('local backend', () => {
     expect(gateway.cancelledOrders).toEqual(['live-1']);
   });
 
-  it('exposes the actual position mode as a protected read without unlocking trading', async () => {
+  it.each(['BINANCE', 'ASTER'])('exposes the actual %s position mode as a protected read without unlocking trading', async (venue) => {
     const { app, gateway, vault, tradingSession } = await createTestApp();
     await vault.set(DEFAULT_CREDENTIAL_PROFILE, { apiKey: 'mode-test-key', apiSecret: 'mode-test-secret' });
     const host = { host: '127.0.0.1:17840' };
-    const url = '/api/trading/position-mode/BINANCE_FUTURE_BTC_USDT';
+    const symbol = `${venue}_FUTURE_BTC_USDT`;
+    const url = `/api/trading/position-mode/${symbol}`;
     vi.spyOn(gateway, 'queryAccount').mockResolvedValue({ ...accountFixture, position_mode: 'DUAL' });
     expect((await app.inject({ method: 'GET', url, headers: host })).statusCode).toBe(403);
     const response = await app.inject({ method: 'GET', url, headers: { ...host, 'x-gct-read-intent': 'position-mode' } });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ symbol: 'BINANCE_FUTURE_BTC_USDT', positionMode: 'DUAL', accountMode: 'CROSS_EXCHANGE', exchangeType: 'CROSSEX' });
+    expect(response.json()).toEqual({ symbol, positionMode: 'DUAL', accountMode: 'CROSS_EXCHANGE', exchangeType: 'CROSSEX' });
     expect(response.headers['cache-control']).toBe('no-store, max-age=0');
     expect(gateway.createdOrders).toEqual([]);
     expect(gateway.leverageUpdates).toEqual([]);
@@ -1548,6 +1549,7 @@ describe('local backend', () => {
       catalogSymbol('GATE_FUTURE_BTC_USDT', 'GATE'),
       catalogSymbol('BINANCE_FUTURE_BTC_USDC', 'BINANCE'),
       catalogSymbol('KRAKEN_FUTURE_SOL_USD', 'KRAKEN'),
+      catalogSymbol('ASTER_FUTURE_BTC_USDT', 'ASTER'),
       catalogSymbol('GATE_FUTURE_ZETA_USDT', 'GATE'),
       catalogSymbol('GATE_FUTURE_SKHYNIX_USDT', 'GATE'),
       catalogSymbol('HYPERLIQUID_FUTURE_SKHX_USDC', 'HYPERLIQUID'),
@@ -1564,6 +1566,7 @@ describe('local backend', () => {
     expect(btc).toMatchObject({ streamed: true, venues: [
       { venue: 'GATE', symbol: 'GATE_FUTURE_BTC_USDT', quote: 'USDT' },
       { venue: 'BINANCE', symbol: 'BINANCE_FUTURE_BTC_USDT', quote: 'USDT' },
+      { venue: 'ASTER', symbol: 'ASTER_FUTURE_BTC_USDT', quote: 'USDT' },
     ] });
     expect(body.assets.find((entry) => entry.asset === 'SOL')?.venues).toEqual([
       { venue: 'KRAKEN', symbol: 'KRAKEN_FUTURE_SOL_USD', quote: 'USD' },
@@ -1602,13 +1605,13 @@ describe('local backend', () => {
     expect(body.assets.find((entry) => entry.asset === 'ZETA')?.venues[0]).toMatchObject({
       venue: 'GATE', fundingRate: null, lastPrice: null, change24h: null,
     });
-    expect(body.venueStatus).toHaveLength(8);
+    expect(body.venueStatus).toHaveLength(9);
     expect(body.venueStatus.every((status) => status.status === 'ok')).toBe(true);
-    expect(publicMarketGateway.fundingStatsQueryCount).toBe(8);
+    expect(publicMarketGateway.fundingStatsQueryCount).toBe(9);
 
     // A second request inside the freshness window reuses the sweep.
     expect((await app.inject({ method: 'GET', url: '/api/markets/funding-overview', headers })).statusCode).toBe(200);
-    expect(publicMarketGateway.fundingStatsQueryCount).toBe(8);
+    expect(publicMarketGateway.fundingStatsQueryCount).toBe(9);
   });
 
   it('still answers the funding overview when every venue fetch fails', async () => {

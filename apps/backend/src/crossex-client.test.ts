@@ -46,22 +46,22 @@ describe('Gate APIv4 signing', () => {
     expect(account.account_mode).toBe('CROSS_EXCHANGE');
   });
 
-  it('signs the required exchange_type query for an isolated account', async () => {
+  it.each(['DERIBIT', 'ASTER'])('signs the required exchange_type query for an isolated %s account', async (venue) => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      expect(String(url)).toBe('https://api.gateio.ws/api/v4/crossex/accounts?exchange_type=DERIBIT');
+      expect(String(url)).toBe(`https://api.gateio.ws/api/v4/crossex/accounts?exchange_type=${venue}`);
       expect(new Headers(init?.headers).get('SIGN')).toMatch(/^[a-f0-9]{128}$/);
       return new Response(JSON.stringify({
         available_margin: '250', margin_balance: '300', initial_margin: '50', maintenance_margin: '20',
         initial_margin_rate: '6', maintenance_margin_rate: '15', position_mode: 'SINGLE',
-        account_mode: 'ISOLATED_EXCHANGE', exchange_type: 'DERIBIT', update_time: '1783689000000', assets: [],
+        account_mode: 'ISOLATED_EXCHANGE', exchange_type: venue, update_time: '1783689000000', assets: [],
       }), { status: 200 });
     });
     const client = new GateCrossExClient(fetchMock as typeof fetch, () => 1_700_000_000_000, undefined, 0);
 
     await expect(client.queryAccount(
       { apiKey: 'test-api-key', apiSecret: 'test-secret' },
-      'deribit',
-    )).resolves.toMatchObject({ account_mode: 'ISOLATED_EXCHANGE', exchange_type: 'DERIBIT' });
+      venue.toLowerCase(),
+    )).resolves.toMatchObject({ account_mode: 'ISOLATED_EXCHANGE', exchange_type: venue });
   });
 
   it('queries exact Gate Spot available balances with the same signed credentials', async () => {

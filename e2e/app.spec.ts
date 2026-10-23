@@ -26,7 +26,7 @@ test.describe.serial('local trading terminal', () => {
     await expect(venueMenu).toBeVisible();
     await expect(venueMenu.getByRole('menuitemradio', { name: /Gate\.io/ })).toHaveAttribute('aria-checked', 'true');
     const venueLogos = venueMenu.locator('.venue-icon img');
-    await expect(venueLogos).toHaveCount(8);
+    await expect(venueLogos).toHaveCount(9);
     expect(await venueLogos.evaluateAll((images) => images.map((image) => image.getAttribute('src'))))
       .toEqual(expect.not.arrayContaining([expect.stringMatching(/^https?:\/\//)]));
   });
@@ -130,7 +130,7 @@ test.describe.serial('local trading terminal', () => {
     const firstVenue = page.getByRole('menuitemradio', { name: /Gate\.io/ });
     await expect(firstVenue).toBeFocused();
     await firstVenue.press('End');
-    const finalVenue = page.getByRole('menuitemradio', { name: /Lighter/ });
+    const finalVenue = page.getByRole('menuitemradio', { name: /Aster/ });
     await expect(finalVenue).toBeFocused();
     await finalVenue.press('Escape');
     await expect(venueTrigger).toBeFocused();

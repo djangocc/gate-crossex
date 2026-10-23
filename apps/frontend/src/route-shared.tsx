@@ -12,7 +12,7 @@ export type Workspace = 'Trade' | 'Strategy' | 'Funding Rates' | 'Portfolio' | '
 export type NavigationLabel = Workspace | 'Boros by Pendle';
 export type StrategyKind = StrategyConfig['kind'];
 export type FundingMetric = 'Per interval' | 'APR' | '24h' | '7d' | '30d';
-export type FundingSortKey = 'asset' | 'oi' | 'arb' | 'average' | 'gate' | 'binance' | 'okx' | 'bybit' | 'kraken' | 'hyperliquid' | 'deribit' | 'lighter';
+export type FundingSortKey = 'asset' | 'oi' | 'arb' | 'average' | 'gate' | 'binance' | 'okx' | 'bybit' | 'kraken' | 'hyperliquid' | 'deribit' | 'lighter' | 'aster';
 export type SortDirection = 'asc' | 'desc';
 
 export interface PairedPositionPrefill {
@@ -108,6 +108,7 @@ export const exchanges = [
   { id: 'hyperliquid', name: 'Hyperliquid', short: 'HL' },
   { id: 'deribit', name: 'Deribit', short: 'DR' },
   { id: 'lighter', name: 'Lighter', short: 'LT' },
+  { id: 'aster', name: 'Aster', short: 'AS' },
 ] as const satisfies ReadonlyArray<{ id: ExchangeLogoId; name: string; short: string }>;
 
 export const FUNDING_VENUE_COLORS: Record<string, string> = {
@@ -119,6 +120,7 @@ export const FUNDING_VENUE_COLORS: Record<string, string> = {
   HYPERLIQUID: '#35c9bc',
   DERIBIT: '#54a7d8',
   LIGHTER: '#7c9cff',
+  ASTER: '#e7c8a0',
 };
 
 export function fundingVenueName(venue: string): string {

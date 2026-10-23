@@ -101,7 +101,7 @@ export class CandleStore {
 
   canBackfill(symbol: string): boolean {
     return typeof this.publicMarketGateway.queryCandles === 'function'
-      && /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER)_FUTURE_/.test(symbol);
+      && /^(GATE|BINANCE|OKX|BYBIT|KRAKEN|HYPERLIQUID|DERIBIT|LIGHTER|ASTER)_FUTURE_/.test(symbol);
   }
 
   backfilledRecently(symbol: string, interval: CandleInterval): boolean {
